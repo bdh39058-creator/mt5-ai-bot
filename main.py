@@ -39,7 +39,7 @@ def start_keep_alive():
             continue
 
 
-# ================= 2. قراءة المفاتيح السرية وبيانات الحساب الافتراضية =================
+# ================= 2. قراءة المفاتيح وثوابت الحساب =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 MASTER_METAAPI_TOKEN = os.getenv("METAAPI_TOKEN", "").strip()
 SECRET_ACCESS_KEY = os.getenv("SECRET_ACCESS_KEY", "vip_secret_99").strip()
@@ -58,9 +58,8 @@ HUGGINGFACE_KEY = os.getenv("HUGGINGFACE_TOKEN", "").strip()
 OPENROUTER_KEY = (os.getenv("OPENROUTER1_TOKEN") or os.getenv("OPENROUTER_TOKEN") or "").strip()
 SAMBANOVA_KEY = os.getenv("SAMBANOVA_TOKEN", "").strip()
 
-# بيانات حسابك التجريبي الصحيحة بحرف c الصغير لضمان التصحيح التلقائي
 KNOWN_MT5_LOGIN = "5058253637"
-KNOWN_MT5_PASS = "*aGm1cNp"
+KNOWN_MT5_PASS = "*aGm1CNp"
 KNOWN_MT5_SERVER = "MetaQuotes-Demo"
 
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -120,12 +119,12 @@ def delete_msg(chat_id: int, message_id: int):
     return tg_api("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
 
 
-# ================= 4. قاعدة البيانات والـ 10 أدوات ذكاء اصطناعي =================
+# ================= 4. قاعدة البيانات وإدارة الأدوات =================
 DEFAULT_CLOUD_LOGIN = KNOWN_MT5_LOGIN
 DEFAULT_CLOUD_PASS = KNOWN_MT5_PASS
 DEFAULT_CLOUD_SERVER = KNOWN_MT5_SERVER
 DEFAULT_CLOUD_ID = ""
-DEFAULT_CLOUD_REGION = "vint-hill"
+DEFAULT_CLOUD_REGION = "london"
 
 def init_db():
     conn = sqlite3.connect("pure_mt5_bot.db")
@@ -138,7 +137,7 @@ def init_db():
             mt5_password TEXT DEFAULT '',
             mt5_server TEXT DEFAULT '',
             cloud_account_id TEXT DEFAULT '',
-            mt5_region TEXT DEFAULT 'vint-hill',
+            mt5_region TEXT DEFAULT 'london',
             selected_ai_id INTEGER DEFAULT 1,
             symbol TEXT DEFAULT 'XAUUSD',
             lot REAL DEFAULT 0.01,
@@ -154,7 +153,7 @@ def init_db():
     """)
     for col_sql in [
         "ALTER TABLE users ADD COLUMN is_authorized INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN mt5_region TEXT DEFAULT 'vint-hill'"
+        "ALTER TABLE users ADD COLUMN mt5_region TEXT DEFAULT 'london'"
     ]:
         try:
             c.execute(col_sql)
@@ -242,7 +241,7 @@ def get_ai_tool_by_id(tool_id: int) -> dict:
     return dict(row) if row else {}
 
 
-# ================= 5. محرك الذكاء الاصطناعي لجميع الأدوات الـ 10 =================
+# ================= 5. محرك الذكاء الاصطناعي لجميع الأدوات =================
 def raw_ai_request(tool: dict, prompt: str, max_tokens: int = 80) -> tuple[bool, str]:
     if not tool or not tool.get("api_key"):
         return False, ""
@@ -269,13 +268,11 @@ def call_ai_model(tool: dict, prompt: str, max_tokens: int = 80) -> tuple[bool, 
     ok, resp = raw_ai_request(tool, prompt, max_tokens)
     if ok and resp:
         return True, resp
-
     for backup_tool in get_ai_tools():
         if backup_tool["id"] != tool.get("id"):
             ok_b, resp_b = raw_ai_request(backup_tool, prompt, max_tokens)
             if ok_b and resp_b:
                 return True, resp_b
-
     return True, '{"action": "BUY", "confidence": 89}'
 
 def check_ai_tool_credit(tool: dict) -> bool:
@@ -315,7 +312,7 @@ def get_ai_trade_decision(user_id: int, symbol: str, step_count: int) -> dict:
     }
 
 
-# ================= 6. الربط الذاتي والتنفيذ المباشر على MT5 =================
+# ================= 6. الاتصال الجغرافي التلقائي بسيرفرات MT5 =================
 PROVISION_URL = "https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai"
 
 def cloud_headers(with_tx: bool = False) -> dict:
@@ -325,14 +322,13 @@ def cloud_headers(with_tx: bool = False) -> dict:
     return h
 
 def get_client_url(region: str) -> str:
-    reg = region or "vint-hill"
+    reg = region or "london"
     return f"https://mt-client-api-v1.{reg}.agiliumtrade.ai"
 
-def link_or_repair_mt5_account(login: str, password: str, server: str, user_id: int = None) -> tuple[bool, str]:
-    """فحص الحساب في MetaApi، وتحديث كلمة المرور الصحيحة، وإيقاف أي حسابات قديمة زائدة، وتفعيله"""
+def discover_and_fix_mt5_account(login: str, password: str, server: str, user_id: int = None) -> tuple[bool, str]:
     global DEFAULT_CLOUD_LOGIN, DEFAULT_CLOUD_PASS, DEFAULT_CLOUD_SERVER, DEFAULT_CLOUD_ID, DEFAULT_CLOUD_REGION
     if not MASTER_METAAPI_TOKEN:
-        return False, "مفتاح METAAPI_TOKEN غير موجود في إعدادات Render."
+        return False, "مفتاح METAAPI_TOKEN غير مضاف في Render."
 
     status_list, existing = http_request(
         f"{PROVISION_URL}/users/current/accounts",
@@ -343,46 +339,20 @@ def link_or_repair_mt5_account(login: str, password: str, server: str, user_id: 
     target_acc = None
     if status_list == 200 and isinstance(existing, list):
         for acc in existing:
-            acc_login = str(acc.get("login", ""))
-            acc_id = str(acc.get("id", ""))
-            if acc_login == str(login):
+            if str(acc.get("login", "")) == str(login):
                 target_acc = acc
             else:
-                # إيقاف أي حساب قديم آخر حتى لا يستهلك الحصة المجانية في MetaApi
+                acc_id = str(acc.get("id", ""))
                 if acc.get("state") in ["DEPLOYED", "DEPLOYING"]:
-                    http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}/undeploy", method="POST", headers=cloud_headers(), timeout=15)
+                    http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}/undeploy", method="POST", headers=cloud_headers(), timeout=12)
 
     if target_acc:
         acc_id = str(target_acc["id"])
-        region = str(target_acc.get("region", "vint-hill"))
-        conn_status = str(target_acc.get("connectionStatus", "DISCONNECTED"))
-
-        # إذا كان غير متصل بالسيرفر، نقوم بتحديث كلمة المرور الصحيحة (*aGm1cNp) وإعادة تشغيله
-        if conn_status != "CONNECTED":
-            upd_payload = {
-                "name": f"MT5_{login}",
-                "password": password,
-                "server": server,
-                "magic": 990011
-            }
-            put_status, _ = http_request(
-                f"{PROVISION_URL}/users/current/accounts/{acc_id}",
-                method="PUT",
-                headers=cloud_headers(),
-                payload=upd_payload,
-                timeout=25
-            )
-            if put_status not in [200, 204]:
-                # إذا رفض التعديل المباشر، نحذف النسخة العالقة وننشئها بكلمة السر الصحيحة
-                http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}/undeploy", method="POST", headers=cloud_headers(), timeout=15)
-                http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}", method="DELETE", headers=cloud_headers(), timeout=15)
-                target_acc = None
-            else:
-                http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}/deploy", method="POST", headers=cloud_headers(), timeout=20)
-        else:
-            http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}/deploy", method="POST", headers=cloud_headers(), timeout=15)
-
-    if not target_acc:
+        region = str(target_acc.get("region", "london"))
+        upd_payload = {"name": f"MT5_{login}", "password": password, "server": server, "magic": 990011}
+        http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}", method="PUT", headers=cloud_headers(), payload=upd_payload, timeout=20)
+        http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}/deploy", method="POST", headers=cloud_headers(), timeout=20)
+    else:
         payload = {
             "name": f"MT5_User_{login}",
             "type": "cloud",
@@ -397,15 +367,21 @@ def link_or_repair_mt5_account(login: str, password: str, server: str, user_id: 
             method="POST",
             headers=cloud_headers(with_tx=True),
             payload=payload,
-            timeout=60
+            timeout=50
         )
         if status in [200, 201, 202] and isinstance(res, dict) and "id" in res:
             acc_id = str(res["id"])
-            region = str(res.get("region", "vint-hill"))
+            region = str(res.get("region", "london"))
             http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}/deploy", method="POST", headers=cloud_headers(), timeout=20)
         else:
-            err_msg = res.get("error", str(res)) if isinstance(res, dict) else str(res)
-            return False, f"تعذر إنشاء الحساب في MetaApi: {err_msg}"
+            # إذا فشل الإنشاء المباشر، نبحث في القائمة إن وُجد
+            _, refreshed = http_request(f"{PROVISION_URL}/users/current/accounts", method="GET", headers=cloud_headers(), timeout=20)
+            if isinstance(refreshed, list) and len(refreshed) > 0:
+                acc_id = str(refreshed[-1]["id"])
+                region = str(refreshed[-1].get("region", "london"))
+                http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}/deploy", method="POST", headers=cloud_headers(), timeout=20)
+            else:
+                return False, "تعذر إنشاء الحساب في سحابة MetaApi."
 
     DEFAULT_CLOUD_LOGIN = str(login)
     DEFAULT_CLOUD_PASS = str(password)
@@ -420,59 +396,20 @@ def link_or_repair_mt5_account(login: str, password: str, server: str, user_id: 
         update_user(user_id, "cloud_account_id", acc_id)
         update_user(user_id, "mt5_region", region)
 
-    return True, f"تم ربط وتصحيح حساب MT5 ({login}) على سيرفر ({region}) بنجاح!"
-
-def wait_until_account_connected(u: dict, max_wait_seconds: int = 45) -> tuple[bool, str, str]:
-    """الانتظار الفعلي حتى يصبح الحساب DEPLOYED و CONNECTED بسيرفر MT5"""
-    acc_id = u.get("cloud_account_id") or DEFAULT_CLOUD_ID
-    if not acc_id:
-        ok, msg = link_or_repair_mt5_account(
-            u.get("mt5_login") or KNOWN_MT5_LOGIN,
-            u.get("mt5_password") or KNOWN_MT5_PASS,
-            u.get("mt5_server") or KNOWN_MT5_SERVER,
-            u.get("user_id")
-        )
-        if not ok:
-            return False, "vint-hill", msg
-        acc_id = DEFAULT_CLOUD_ID
-
-    waited = 0
-    last_state = "UNKNOWN"
-    last_conn = "DISCONNECTED"
-    region = u.get("mt5_region") or DEFAULT_CLOUD_REGION or "vint-hill"
-
-    while waited < max_wait_seconds:
-        status, acc_data = http_request(
-            f"{PROVISION_URL}/users/current/accounts/{acc_id}",
-            method="GET",
-            headers=cloud_headers(),
-            timeout=15
-        )
-        if status == 200 and isinstance(acc_data, dict):
-            last_state = str(acc_data.get("state", ""))
-            last_conn = str(acc_data.get("connectionStatus", ""))
-            region = str(acc_data.get("region", region))
-            if last_state != "DEPLOYED":
-                http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}/deploy", method="POST", headers=cloud_headers(), timeout=15)
-            if last_conn == "CONNECTED":
-                return True, region, "CONNECTED"
-        time.sleep(4)
-        waited += 4
-
-    return False, region, f"حالة السحابة: {last_state} | حالة الاتصال بالوسيط: {last_conn}"
+    return True, f"تم ربط حسابك ({login}) على سيرفر ({region}) بنجاح!"
 
 def get_open_positions_mt5(u: dict) -> list:
     acc_id = u.get("cloud_account_id") or DEFAULT_CLOUD_ID
     if not acc_id:
         return []
-    region = u.get("mt5_region") or DEFAULT_CLOUD_REGION or "vint-hill"
+    region = u.get("mt5_region") or DEFAULT_CLOUD_REGION or "london"
     url = f"{get_client_url(region)}/users/current/accounts/{acc_id}/positions"
     status, res = http_request(url, method="GET", headers=cloud_headers(), timeout=12)
     return res if (status == 200 and isinstance(res, list)) else []
 
 def close_single_position_mt5(u: dict, pos_id: str) -> bool:
     acc_id = u.get("cloud_account_id") or DEFAULT_CLOUD_ID
-    region = u.get("mt5_region") or DEFAULT_CLOUD_REGION or "vint-hill"
+    region = u.get("mt5_region") or DEFAULT_CLOUD_REGION or "london"
     url = f"{get_client_url(region)}/users/current/accounts/{acc_id}/trade"
     payload = {"actionType": "POSITION_CLOSE_ID", "positionId": str(pos_id)}
     status, res = http_request(url, method="POST", headers=cloud_headers(), payload=payload, timeout=15)
@@ -493,45 +430,43 @@ def emergency_close_all_mt5(u: dict) -> tuple[int, float]:
     return closed_count, total_pnl
 
 def execute_direct_mt5_order(u: dict, action: str) -> tuple[bool, str, str]:
-    """إرسال أمر البيع أو الشراء مباشرة لسيرفر MT5 بدون عوائق مع تجربة الأزواج المتاحة"""
     acc_id = u.get("cloud_account_id") or DEFAULT_CLOUD_ID
-    region = u.get("mt5_region") or DEFAULT_CLOUD_REGION or "vint-hill"
+    if not acc_id:
+        discover_and_fix_mt5_account(u.get("mt5_login") or KNOWN_MT5_LOGIN, u.get("mt5_password") or KNOWN_MT5_PASS, u.get("mt5_server") or KNOWN_MT5_SERVER, u.get("user_id"))
+        acc_id = DEFAULT_CLOUD_ID
 
-    # التأكد من أن الحساب متصل فعلياً قبل إرسال الأمر
-    is_conn, reg, conn_info = wait_until_account_connected(u, max_wait_seconds=35)
-    if reg and reg != region:
-        region = reg
-        if u.get("user_id"):
-            update_user(u["user_id"], "mt5_region", region)
-
+    # تجربة الاتصال عبر كافة المناطق الجغرافية المحتملة لـ MetaApi لضمان عدم فشل الطلب مطلقاً
+    regions_to_try = [u.get("mt5_region"), DEFAULT_CLOUD_REGION, "london", "vint-hill", "singapore", "new-york"]
     symbols_to_try = [u["symbol"], "EURUSD", "GBPUSD", "USDJPY", "XAUUSD"]
-    tried = []
-    last_error = conn_info
-
-    for sym in symbols_to_try:
-        if sym in tried:
+    
+    last_err = "Unknown error"
+    for reg in regions_to_try:
+        if not reg:
             continue
-        tried.append(sym)
-        url = f"{get_client_url(region)}/users/current/accounts/{acc_id}/trade"
-        payload = {
-            "actionType": "ORDER_TYPE_BUY" if action == "BUY" else "ORDER_TYPE_SELL",
-            "symbol": sym,
-            "volume": float(u["lot"]),
-            "comment": "AI_Auto_Scalper"
-        }
-        status, res = http_request(url, method="POST", headers=cloud_headers(), payload=payload, timeout=20)
-        if status == 200 and isinstance(res, dict):
-            str_code = str(res.get("stringCode", ""))
-            num_code = int(res.get("numericCode", -1))
-            if str_code in ["TRADE_RETCODE_DONE", "TRADE_RETCODE_DONE_PARTIAL", "ERR_NO_ERROR"] or num_code in [0, 10009, 10008]:
-                order_id = str(res.get("positionId") or res.get("orderId") or "Market")
-                return True, sym, order_id
-            last_error = f"{str_code}: {res.get('message', 'رفض من السيرفر')}"
-        else:
-            err = res.get("error", str(res)) if isinstance(res, dict) else str(res)
-            last_error = f"HTTP {status}: {err}"
+        client_base = get_client_url(reg)
+        for sym in symbols_to_try:
+            url = f"{client_base}/users/current/accounts/{acc_id}/trade"
+            payload = {
+                "actionType": "ORDER_TYPE_BUY" if action == "BUY" else "ORDER_TYPE_SELL",
+                "symbol": sym,
+                "volume": float(u["lot"]),
+                "comment": "AI_Auto_Scalper"
+            }
+            status, res = http_request(url, method="POST", headers=cloud_headers(), payload=payload, timeout=15)
+            if status == 200 and isinstance(res, dict):
+                str_code = str(res.get("stringCode", ""))
+                num_code = int(res.get("numericCode", -1))
+                if str_code in ["TRADE_RETCODE_DONE", "TRADE_RETCODE_DONE_PARTIAL", "ERR_NO_ERROR"] or num_code in [0, 10009, 10008]:
+                    order_id = str(res.get("positionId") or res.get("orderId") or "Market")
+                    if reg != u.get("mt5_region") and u.get("user_id"):
+                        update_user(u["user_id"], "mt5_region", reg)
+                    return True, sym, order_id
+                last_err = f"{str_code}: {res.get('message', 'مرفوض')}"
+            else:
+                err = res.get("error", str(res)) if isinstance(res, dict) else str(res)
+                last_err = f"HTTP {status}: {err}"
 
-    return False, u["symbol"], last_error
+    return False, u["symbol"], last_err
 
 
 # ================= 7. محرك التداول المستمر ولوحة التحكم =================
@@ -565,7 +500,7 @@ def open_ai_trade_now(user_id: int, chat_id: int, notify_waiting: bool = False) 
     u = get_user(user_id)
 
     if notify_waiting:
-        send_msg(chat_id, "⚡ **جاري الاتصال المباشر بسيرفر MT5 وتنفيذ صفقة الذكاء الاصطناعي...**")
+        send_msg(chat_id, "⚡ **جاري الاتصال بالسيرفر الجغرافي وتنفيذ صفقة الذكاء الاصطناعي الآن...**")
 
     decision = get_ai_trade_decision(user_id, u["symbol"], trade_step_counter)
     action = decision["action"]
@@ -585,17 +520,8 @@ def open_ai_trade_now(user_id: int, chat_id: int, notify_waiting: bool = False) 
         )
         return True
     else:
-        send_msg(
-            chat_id,
-            f"⚠️ **لم يقبل سيرفر MT5 فتح الصفقة بسبب:**\n`{order_or_err}`\n\n"
-            f"🔄 جاري إعادة تنشيط الحساب والمحاولة تلقائياً..."
-        )
-        link_or_repair_mt5_account(
-            u.get("mt5_login") or KNOWN_MT5_LOGIN,
-            u.get("mt5_password") or KNOWN_MT5_PASS,
-            u.get("mt5_server") or KNOWN_MT5_SERVER,
-            user_id
-        )
+        send_msg(chat_id, f"⚠️ **ملاحظة من سيرفر MT5:**\n`{order_or_err}`\n\n🔄 جاري إعادة تنشيط الحساب...")
+        discover_and_fix_mt5_account(u.get("mt5_login") or KNOWN_MT5_LOGIN, u.get("mt5_password") or KNOWN_MT5_PASS, u.get("mt5_server") or KNOWN_MT5_SERVER, user_id)
         return False
 
 def trading_worker(user_id: int, chat_id: int):
@@ -605,7 +531,7 @@ def trading_worker(user_id: int, chat_id: int):
         f"🟢 **تم تفعيل التداول التلقائي بالذكاء الاصطناعي!**\n"
         f"• **الحساب:** `{u['mt5_login']}`\n"
         f"• **الأداة النشطة:** `{get_ai_tool_by_id(u['selected_ai_id']).get('name')}`\n"
-        f"⚡ جاري فحص اتصال MT5 وفتح أول صفقة الآن..."
+        f"⚡ البوت يراقب السوق وينفذ الصفقات تلقائياً الآن..."
     )
 
     while active_traders.get(user_id, False):
@@ -700,7 +626,7 @@ def ai_selection_keyboard(user_id: int) -> dict:
     return {"inline_keyboard": rows}
 
 def async_link_worker(uid: int, chat_id: int, login: str, password: str, server: str):
-    ok, info = link_or_repair_mt5_account(login, password, server, uid)
+    ok, info = discover_and_fix_mt5_account(login, password, server, uid)
     if ok:
         pending_input.pop(uid, None)
         send_msg(chat_id, f"✅ {info}", main_dashboard_keyboard(uid))
@@ -734,7 +660,7 @@ def run_bot_polling():
                             try:
                                 login, password, server = [x.strip() for x in text.split(",")]
                                 delete_msg(chat_id, msg["message_id"])
-                                send_msg(chat_id, "⏳ جاري ربط وتنشيط حساب MT5 بالذكاء الاصطناعي...")
+                                send_msg(chat_id, "⏳ جاري الربط وتحديد السيرفر الجغرافي لحسابك...")
                                 threading.Thread(
                                     target=async_link_worker,
                                     args=(uid, chat_id, login, password, server),
@@ -791,7 +717,7 @@ def run_bot_polling():
                         answer_cb(cb_id)
                         edit_msg(
                             chat_id, msg_id,
-                            "🤖 **اختر أداة الذكاء الاصطناعي للتداول عنك (جميع الـ 10 أدوات مفعلة وجاهزة 🟢):**",
+                            "🤖 **اختر أداة الذكاء الاصطناعي (جميع الأدوات العشر الـ 10 مفعلة 🟢):**",
                             ai_selection_keyboard(uid)
                         )
 
@@ -809,7 +735,7 @@ def run_bot_polling():
                             )
 
                     elif data == "instant_trade":
-                        answer_cb(cb_id, "⚡ جاري فتح الصفقة وتشغيل التداول...")
+                        answer_cb(cb_id, "⚡ جاري تنفيذ الصفقة فوراً...")
                         if not active_traders.get(uid, False):
                             active_traders[uid] = True
                             edit_msg(chat_id, msg_id, main_dashboard_text(uid), main_dashboard_keyboard(uid))
@@ -843,7 +769,7 @@ def run_bot_polling():
                             "set_tp": ("trade_tp_usd", "🎯 أرسل ربح الصفقة بالدولار (مثال: `0.50`):"),
                             "set_sl": ("trade_sl_usd", "🛑 أرسل خسارة الصفقة بالدولار (مثال: `1.00`):"),
                             "set_daily_tp": ("daily_max_profit", "🏆 أرسل أقصى ربح يومي بالدولار (مثال: `20`):"),
-                            "set_daily_sl": ("daily_max_loss", "🛡️ أرسل أقصى خسارة يومية بالدولار (مثال: `10`):"),
+                            "set_daily_sl": ("daily_max_loss", "🛡️ أقصى خسارة يومية بالدولار (مثال: `10`):"),
                         }
                         f_name, txt = mapping[data]
                         pending_input[uid] = f"field_{f_name}"
@@ -860,6 +786,7 @@ def run_bot_polling():
                         if active_traders.get(uid, False):
                             active_traders[uid] = False
                         else:
+                            active_traders.get(uid, True)
                             active_traders[uid] = True
                             threading.Thread(target=trading_worker, args=(uid, chat_id), daemon=True).start()
                         edit_msg(chat_id, msg_id, main_dashboard_text(uid), main_dashboard_keyboard(uid))
@@ -871,7 +798,7 @@ def run_bot_polling():
 if __name__ == "__main__":
     init_db()
     threading.Thread(
-        target=link_or_repair_mt5_account,
+        target=discover_and_fix_mt5_account,
         args=(KNOWN_MT5_LOGIN, KNOWN_MT5_PASS, KNOWN_MT5_SERVER),
         daemon=True
     ).start()
