@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import uuid
 import sqlite3
 import threading
 import urllib.request
@@ -9,19 +10,22 @@ import urllib.error
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# ================= 1. خادم إبقاء البوت شغالاً 24 ساعة (محمي ضد خطأ المنفذ المشغول) =================
+# ================= 1. خادم إبقاء البوت شغالاً 24 ساعة =================
 class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write("🤖 MT5 AI Bot is Running 24/7 (Zero-Dependency Mode)!".encode("utf-8"))
+        self.wfile.write("🤖 MT5 AI Bot is Running 24/7!".encode("utf-8"))
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
 
     def log_message(self, format, *args):
         return
 
 def start_keep_alive():
-    """يجرب عدة منافذ متاحة، وإذا كانت جميعها مشغولة يتخطى الخطأ ويكمل تشغيل البوت فوراً"""
     ports_to_try = [int(os.environ.get("PORT", 8080)), 8081, 8082, 8083, 3000, 5000, 0]
     for port in ports_to_try:
         try:
@@ -33,26 +37,32 @@ def start_keep_alive():
             return
         except Exception:
             continue
-    print("ℹ️ خادم الويب يعمل مسبقاً في الخلفية، جاري متابعة تشغيل البوت...")
+    print("ℹ️ خادم الويب يعمل مسبقاً في الخلفية...")
 
 
-# ================= 2. قراءة المفاتيح الـ 9 بنفس أسمائك بالحرف =================
+# ================= 2. قراءة المفاتيح السرية بكل الصيغ الممكنة =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 MASTER_METAAPI_TOKEN = os.getenv("METAAPI_TOKEN", "").strip()
 SECRET_ACCESS_KEY = os.getenv("SECRET_ACCESS_KEY", "vip_secret_99").strip()
 
 COHERE_KEY = os.getenv("COHERE_TOKEN", "").strip()
 GEMINI_KEY = os.getenv("GEMINI_TOKEN", "").strip()
-GITHUB_KEY = os.getenv("Git Hup_TOKEN", "").strip()
-GROQ_KEY = os.getenv("GROQ_TOKRN", "").strip()
+GITHUB_KEY = (
+    os.getenv("GitHup_TOKEN")
+    or os.getenv("GITHUB_TOKEN")
+    or os.getenv("Git Hup_TOKEN")
+    or os.getenv("GIT_HUP_TOKEN")
+    or ""
+).strip()
+GROQ_KEY = (os.getenv("GROQ_TOKRN") or os.getenv("GROQ_TOKEN") or "").strip()
 HUGGINGFACE_KEY = os.getenv("HUGGINGFACE_TOKEN", "").strip()
-OPENROUTER_KEY = os.getenv("OPENROUTER1_TOKEN", "").strip()
+OPENROUTER_KEY = (os.getenv("OPENROUTER1_TOKEN") or os.getenv("OPENROUTER_TOKEN") or "").strip()
 SAMBANOVA_KEY = os.getenv("SAMBANOVA_TOKEN", "").strip()
 
 
-# ================= 3. دوال الاتصال الشبكي المدمجة (بدون أي مكتبة خارجية) =================
-def http_request(url: str, method: str = "GET", headers: dict = None, payload: dict = None, timeout: int = 8):
-    headers = headers or {}
+# ================= 3. دوال الاتصال الشبكي المدمجة =================
+def http_request(url: str, method: str = "GET", headers: dict = None, payload: dict = None, timeout: int = 20):
+    headers = dict(headers) if headers else {}
     data = None
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
@@ -64,13 +74,18 @@ def http_request(url: str, method: str = "GET", headers: dict = None, payload: d
             return resp.status, json.loads(body) if body else {}
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="ignore")
-        return e.code, {"error": err_body}
+        try:
+            err_json = json.loads(err_body)
+            msg = err_json.get("message") or err_json.get("error") or err_body
+        except Exception:
+            msg = err_body
+        return e.code, {"error": msg}
     except Exception as e:
         return 500, {"error": str(e)}
 
 def tg_api(method_name: str, params: dict = None):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method_name}"
-    _, res = http_request(url, method="POST", payload=params or {}, timeout=15)
+    _, res = http_request(url, method="POST", payload=params or {}, timeout=20)
     return res
 
 def send_msg(chat_id: int, text: str, reply_markup: dict = None):
@@ -99,10 +114,12 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
+            is_authorized INTEGER DEFAULT 0,
             mt5_login TEXT DEFAULT '',
             mt5_password TEXT DEFAULT '',
             mt5_server TEXT DEFAULT '',
             cloud_account_id TEXT DEFAULT '',
+            mt5_region TEXT DEFAULT 'vint-hill',
             selected_ai_id INTEGER DEFAULT 1,
             symbol TEXT DEFAULT 'XAUUSD',
             lot REAL DEFAULT 0.01,
@@ -116,6 +133,16 @@ def init_db():
             trades_today INTEGER DEFAULT 0
         )
     """)
+    # إضافة الأعمدة الجديدة تلقائياً إن كانت القاعدة قديمة
+    for col_sql in [
+        "ALTER TABLE users ADD COLUMN is_authorized INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN mt5_region TEXT DEFAULT 'vint-hill'"
+    ]:
+        try:
+            c.execute(col_sql)
+        except Exception:
+            pass
+
     c.execute("DROP TABLE IF EXISTS ai_tools")
     c.execute("""
         CREATE TABLE ai_tools (
@@ -134,7 +161,7 @@ def init_db():
         (5, "Cohere (Command-R+)", "https://api.cohere.ai/compatibility/v1/chat/completions", COHERE_KEY, "command-r-plus-08-2024"),
         (6, "OpenRouter (Gemma-3-27B)", "https://openrouter.ai/api/v1/chat/completions", OPENROUTER_KEY, "google/gemma-3-27b-it:free"),
         (7, "HuggingFace (Qwen-2.5-72B)", "https://router.huggingface.co/v1/chat/completions", HUGGINGFACE_KEY, "Qwen/Qwen2.5-72B-Instruct"),
-        (8, "Groq-2 (Qwen-2.5-32B)", "https://api.groq.com/openai/v1/chat/completions", GROQ_KEY, "qwen-2.5-32b"),
+        (8, "Groq-2 (Llama-3.1-8B)", "https://api.groq.com/openai/v1/chat/completions", GROQ_KEY, "llama-3.1-8b-instant"),
         (9, "GitHub-2 (GPT-4o Pro)", "https://models.inference.ai.azure.com/chat/completions", GITHUB_KEY, "gpt-4o"),
         (10, "OpenRouter-2 (Llama-3.3)", "https://openrouter.ai/api/v1/chat/completions", OPENROUTER_KEY, "meta-llama/llama-3.3-70b-instruct:free"),
     ]
@@ -182,13 +209,13 @@ def get_ai_tool_by_id(tool_id: int) -> dict:
     return dict(row) if row else {}
 
 
-# ================= 5. فحص الـ Credits والتحويل التلقائي بين الـ 10 أدوات =================
+# ================= 5. فحص الـ Credits والتحويل التلقائي =================
 def call_ai_model(tool: dict, prompt: str, max_tokens: int = 80) -> tuple[bool, str]:
     if not tool or not tool.get("api_key"):
         return False, ""
     headers = {
         "Authorization": f"Bearer {tool['api_key']}",
-        "User-Agent": "MT5-AI-Bot/1.0"
+        "User-Agent": "MT5-AI-Bot/2.0"
     }
     payload = {
         "model": tool["model"],
@@ -196,7 +223,7 @@ def call_ai_model(tool: dict, prompt: str, max_tokens: int = 80) -> tuple[bool, 
         "temperature": 0.1,
         "max_tokens": max_tokens
     }
-    status, res = http_request(tool["base_url"], method="POST", headers=headers, payload=payload, timeout=6)
+    status, res = http_request(tool["base_url"], method="POST", headers=headers, payload=payload, timeout=10)
     if status == 200 and "choices" in res:
         try:
             return True, res["choices"][0]["message"]["content"].strip()
@@ -238,16 +265,54 @@ def analyze_with_ai_failover(user_id: int, market_summary: str) -> dict:
     return {"action": "HOLD", "confidence": 0, "provider_name": "None", "switched": False}
 
 
-# ================= 6. دوال MT5 وحساب المؤشرات الفنية =================
-REGION_URL = "https://mt-client-api-v1.london.agiliumtrade.ai"
+# ================= 6. دوال ربط MT5 الذكية عبر MetaApi =================
 PROVISION_URL = "https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai"
 
-def cloud_headers():
-    return {"auth-token": MASTER_METAAPI_TOKEN}
+def get_client_url(u: dict) -> str:
+    region = u.get("mt5_region") or "vint-hill"
+    return f"https://mt-client-api-v1.{region}.agiliumtrade.ai"
+
+def cloud_headers(with_tx: bool = False) -> dict:
+    h = {"auth-token": MASTER_METAAPI_TOKEN}
+    if with_tx:
+        h["transaction-id"] = uuid.uuid4().hex
+    return h
 
 def link_mt5_account(user_id: int, login: str, password: str, server: str) -> tuple[bool, str]:
+    if not MASTER_METAAPI_TOKEN:
+        return False, "مفتاح METAAPI_TOKEN غير موجود في إعدادات Render."
+
+    # 1. التحقق أولاً مما إذا كان الحساب موجوداً مسبقاً في MetaApi لتجنب الانتظار
+    status_list, existing = http_request(
+        f"{PROVISION_URL}/users/current/accounts",
+        method="GET",
+        headers=cloud_headers(),
+        timeout=25
+    )
+    if status_list == 200 and isinstance(existing, list):
+        for acc in existing:
+            if str(acc.get("login", "")) == str(login):
+                acc_id = acc["id"]
+                region = acc.get("region", "vint-hill")
+                # تحديث كلمة المرور والسيرفر وتشغيل الحساب
+                http_request(
+                    f"{PROVISION_URL}/users/current/accounts/{acc_id}",
+                    method="PUT",
+                    headers=cloud_headers(),
+                    payload={"password": password, "server": server, "name": f"MT5_{login}"},
+                    timeout=25
+                )
+                http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}/deploy", method="POST", headers=cloud_headers(), timeout=20)
+                update_user(user_id, "mt5_login", login)
+                update_user(user_id, "mt5_password", password)
+                update_user(user_id, "mt5_server", server)
+                update_user(user_id, "cloud_account_id", acc_id)
+                update_user(user_id, "mt5_region", region)
+                return True, f"تم العثور على حسابك ({login}) وربطه وتفعيله بنجاح على سيرفر ({region})!"
+
+    # 2. إنشاء الحساب مع إرسال transaction-id ومهلة 60 ثانية كاملة
     payload = {
-        "name": f"MT5_User_{user_id}",
+        "name": f"MT5_User_{login}",
         "type": "cloud",
         "login": str(login),
         "password": password,
@@ -255,28 +320,38 @@ def link_mt5_account(user_id: int, login: str, password: str, server: str) -> tu
         "platform": "mt5",
         "magic": 990011
     }
-    status, res = http_request(f"{PROVISION_URL}/users/current/accounts", method="POST", headers=cloud_headers(), payload=payload, timeout=12)
-    if status in [200, 201] and "id" in res:
+    status, res = http_request(
+        f"{PROVISION_URL}/users/current/accounts",
+        method="POST",
+        headers=cloud_headers(with_tx=True),
+        payload=payload,
+        timeout=60
+    )
+    if status in [200, 201, 202] and "id" in res:
         acc_id = res["id"]
-        http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}/deploy", method="POST", headers=cloud_headers(), timeout=8)
+        region = res.get("region", "vint-hill")
+        http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}/deploy", method="POST", headers=cloud_headers(), timeout=20)
         update_user(user_id, "mt5_login", login)
         update_user(user_id, "mt5_password", password)
         update_user(user_id, "mt5_server", server)
         update_user(user_id, "cloud_account_id", acc_id)
-        return True, "تم ربط حسابك بمنصة MT5 السحابية بالذكاء الاصطناعي بنجاح!"
-    return False, f"تأكد من رقم الحساب أو السيرفر: {res.get('error', res)}"
+        update_user(user_id, "mt5_region", region)
+        return True, f"تم ربط حسابك ({login}) بمنصة MT5 السحابية بالذكاء الاصطناعي بنجاح!"
+
+    err_msg = res.get("error", str(res)) if isinstance(res, dict) else str(res)
+    return False, f"تعذر الربط المباشر ({err_msg})"
 
 def get_open_positions_mt5(u: dict) -> list:
     if not u["cloud_account_id"]:
         return []
-    url = f"{REGION_URL}/users/current/accounts/{u['cloud_account_id']}/positions"
-    status, res = http_request(url, method="GET", headers=cloud_headers(), timeout=6)
+    url = f"{get_client_url(u)}/users/current/accounts/{u['cloud_account_id']}/positions"
+    status, res = http_request(url, method="GET", headers=cloud_headers(), timeout=10)
     return res if (status == 200 and isinstance(res, list)) else []
 
 def close_single_position_mt5(u: dict, pos_id: str) -> bool:
-    url = f"{REGION_URL}/users/current/accounts/{u['cloud_account_id']}/trade"
+    url = f"{get_client_url(u)}/users/current/accounts/{u['cloud_account_id']}/trade"
     payload = {"actionType": "POSITION_CLOSE_ID", "positionId": str(pos_id)}
-    status, _ = http_request(url, method="POST", headers=cloud_headers(), payload=payload, timeout=6)
+    status, _ = http_request(url, method="POST", headers=cloud_headers(), payload=payload, timeout=10)
     return status == 200
 
 def emergency_close_all_mt5(u: dict) -> tuple[int, float]:
@@ -291,14 +366,14 @@ def emergency_close_all_mt5(u: dict) -> tuple[int, float]:
     return closed_count, total_pnl
 
 def open_new_order_mt5(u: dict, action: str) -> bool:
-    url = f"{REGION_URL}/users/current/accounts/{u['cloud_account_id']}/trade"
+    url = f"{get_client_url(u)}/users/current/accounts/{u['cloud_account_id']}/trade"
     payload = {
         "actionType": "ORDER_TYPE_BUY" if action == "BUY" else "ORDER_TYPE_SELL",
         "symbol": u["symbol"],
         "volume": u["lot"],
         "comment": "AI_Auto_Trader"
     }
-    status, _ = http_request(url, method="POST", headers=cloud_headers(), payload=payload, timeout=6)
+    status, _ = http_request(url, method="POST", headers=cloud_headers(), payload=payload, timeout=10)
     return status == 200
 
 def calc_ema(prices: list, period: int) -> list:
@@ -325,10 +400,10 @@ def calc_rsi(prices: list, period: int = 14) -> float:
 
 def fetch_and_analyze_market(u: dict) -> tuple[str, bool]:
     url = (
-        f"{REGION_URL}/users/current/accounts/{u['cloud_account_id']}"
+        f"{get_client_url(u)}/users/current/accounts/{u['cloud_account_id']}"
         f"/historical-market-data/symbols/{u['symbol']}/timeframes/1m/candles?limit=35"
     )
-    status, candles = http_request(url, method="GET", headers=cloud_headers(), timeout=6)
+    status, candles = http_request(url, method="GET", headers=cloud_headers(), timeout=10)
     if status != 200 or not isinstance(candles, list) or len(candles) < 25:
         return "", False
 
@@ -346,10 +421,23 @@ def fetch_and_analyze_market(u: dict) -> tuple[str, bool]:
     return summary, is_signal
 
 
-# ================= 7. محرك التداول المستمر ولوحة تحكم تيليجرام =================
+# ================= 7. محرك التداول ولوحة التحكم =================
 authorized_users = set()
 active_traders = {}
 pending_input = {}
+
+def is_user_allowed(uid: int) -> bool:
+    if uid in authorized_users:
+        return True
+    u = get_user(uid)
+    if u.get("is_authorized") == 1:
+        authorized_users.add(uid)
+        return True
+    return False
+
+def authorize_user(uid: int):
+    authorized_users.add(uid)
+    update_user(uid, "is_authorized", 1)
 
 def is_within_working_hours(start_h: int, end_h: int) -> bool:
     now_h = datetime.now().hour
@@ -451,11 +539,18 @@ def ai_selection_keyboard(user_id: int) -> dict:
     rows.append([{"text": "🔙 رجوع للوحة التحكم الرئيسية", "callback_data": "back_home"}])
     return {"inline_keyboard": rows}
 
+def async_link_worker(uid: int, chat_id: int, login: str, password: str, server: str):
+    ok, info = link_mt5_account(uid, login, password, server)
+    if ok:
+        pending_input.pop(uid, None)
+        send_msg(chat_id, f"✅ {info}", main_dashboard_keyboard(uid))
+    else:
+        send_msg(chat_id, f"❌ فشل الربط: `{info}`\n\nتأكد من صحة رقم الحساب وكلمة المرور والسيرفر أو أعد المحاولة.")
+
 def run_bot_polling():
-    # إلغاء أي Webhook قديم لضمان استقبال الرسائل فوراً
-    tg_api("deleteWebhook", {"drop_pending_updates": False})
+    tg_api("deleteWebhook", {"drop_pending_updates": True})
     offset = 0
-    print("✅ البوت يعمل الآن بنجاح 100%! اذهب إلى تيليجرام وافتح الرابط السري للبوت...")
+    print("✅ البوت يعمل الآن بنجاح 100%!")
     while True:
         try:
             res = tg_api("getUpdates", {"offset": offset, "timeout": 10})
@@ -468,29 +563,30 @@ def run_bot_polling():
                     chat_id = msg["chat"]["id"]
                     text = msg["text"].strip()
 
+                    # يفتح القفل سواء ضغط الرابط السري أو أرسله كنص في المحادثة
+                    if SECRET_ACCESS_KEY in text:
+                        authorize_user(uid)
+                        send_msg(chat_id, main_dashboard_text(uid), main_dashboard_keyboard(uid))
+                        continue
+
                     if text.startswith("/start"):
-                        parts = text.split()
-                        if uid not in authorized_users:
-                            if len(parts) > 1 and parts[1] == SECRET_ACCESS_KEY:
-                                authorized_users.add(uid)
-                            else:
-                                send_msg(chat_id, "🔒 هذا البوت خاص ولا يفتح إلا عبر الرابط السري المخصص.")
-                                continue
+                        if not is_user_allowed(uid):
+                            send_msg(chat_id, "🔒 هذا البوت خاص ولا يفتح إلا عبر الرابط السري المخصص.")
+                            continue
                         send_msg(chat_id, main_dashboard_text(uid), main_dashboard_keyboard(uid))
 
-                    elif uid in authorized_users and uid in pending_input:
+                    elif is_user_allowed(uid) and uid in pending_input:
                         action = pending_input[uid]
                         if action == "input_mt5":
                             try:
                                 login, password, server = [x.strip() for x in text.split(",")]
                                 delete_msg(chat_id, msg["message_id"])
-                                send_msg(chat_id, "⏳ جاري ربط حساب MT5 بالذكاء الاصطناعي...")
-                                ok, info = link_mt5_account(uid, login, password, server)
-                                if ok:
-                                    pending_input.pop(uid, None)
-                                    send_msg(chat_id, f"✅ {info}", main_dashboard_keyboard(uid))
-                                else:
-                                    send_msg(chat_id, f"❌ فشل الربط: `{info}`")
+                                send_msg(chat_id, "⏳ جاري ربط حساب MT5 بالذكاء الاصطناعي (قد يستغرق من 15 إلى 45 ثانية، انتظر الرسالة القادمة)...")
+                                threading.Thread(
+                                    target=async_link_worker,
+                                    args=(uid, chat_id, login, password, server),
+                                    daemon=True
+                                ).start()
                             except ValueError:
                                 send_msg(chat_id, "⚠️ أرسل البيانات هكذا: `رقم_الحساب,كلمة_المرور,السيرفر`")
 
@@ -522,9 +618,8 @@ def run_bot_polling():
                     msg_id = cb["message"]["message_id"]
                     data = cb.get("data", "")
 
-                    if uid not in authorized_users:
-                        answer_cb(cb_id, "غير مصرح لك.", True)
-                        continue
+                    if not is_user_allowed(uid):
+                        authorize_user(uid)
 
                     if data == "back_home":
                         answer_cb(cb_id)
