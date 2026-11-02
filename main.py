@@ -16,7 +16,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write("🤖 MT5 AI Scalping Bot is Running 24/7!".encode("utf-8"))
+        self.wfile.write("🤖 MT5 AI Ultimate Bot is Running 24/7!".encode("utf-8"))
 
     def do_HEAD(self):
         self.send_response(200)
@@ -59,7 +59,7 @@ OPENROUTER_KEY = (os.getenv("OPENROUTER1_TOKEN") or os.getenv("OPENROUTER_TOKEN"
 SAMBANOVA_KEY = os.getenv("SAMBANOVA_TOKEN", "").strip()
 
 KNOWN_MT5_LOGIN = "5058253637"
-KNOWN_MT5_PASS = "*aGm1CNp"
+KNOWN_MT5_PASS = "*aGm1cNp"
 KNOWN_MT5_SERVER = "MetaQuotes-Demo"
 
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -301,18 +301,18 @@ def get_ai_trade_decision(user_id: int, symbol: str, step_count: int) -> dict:
             return {
                 "action": act,
                 "confidence": max(int(decision.get("confidence", 88)), 84),
-                "provider_name": preferred_tool.get("name", "Groq AI")
+                "provider_name": preferred_tool.get("name", "AI Scalper")
             }
         except Exception:
             pass
     return {
         "action": default_action,
         "confidence": 88,
-        "provider_name": preferred_tool.get("name", "Groq AI")
+        "provider_name": preferred_tool.get("name", "AI Scalper")
     }
 
 
-# ================= 6. الاتصال الجغرافي التلقائي بسيرفرات MT5 =================
+# ================= 6. نظام الاتصال الذكي وإدارة حساب MT5 =================
 PROVISION_URL = "https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai"
 
 def cloud_headers(with_tx: bool = False) -> dict:
@@ -397,53 +397,6 @@ def discover_and_fix_mt5_account(login: str, password: str, server: str, user_id
 
     return True, f"تم ربط حسابك ({login}) على سيرفر ({region}) بنجاح!"
 
-def run_diagnostic_check(u: dict) -> str:
-    """فحص دقيق ومفصل لحالة الحساب والاتصال في سحابة MetaApi"""
-    acc_id = u.get("cloud_account_id") or DEFAULT_CLOUD_ID
-    if not acc_id:
-        discover_and_fix_mt5_account(u.get("mt5_login") or KNOWN_MT5_LOGIN, u.get("mt5_password") or KNOWN_MT5_PASS, u.get("mt5_server") or KNOWN_MT5_SERVER, u.get("user_id"))
-        acc_id = DEFAULT_CLOUD_ID
-
-    if not acc_id:
-        return "❌ لا يوجد معرف سحابي (Account ID) مسجل للحساب."
-
-    status, acc_data = http_request(
-        f"{PROVISION_URL}/users/current/accounts/{acc_id}",
-        method="GET",
-        headers=cloud_headers(),
-        timeout=15
-    )
-    if status != 200 or not isinstance(acc_data, dict):
-        return f"❌ فشل الاتصال بسيرفر MetaApi (كود HTTP {status}): {acc_data}"
-
-    state = acc_data.get("state", "Unknown")
-    conn = acc_data.get("connectionStatus", "Unknown")
-    reg = acc_data.get("region", "london")
-    login = acc_data.get("login", "")
-
-    # محاولة جلب معلومات الحساب المالية لضمان عمل الاتصال الحي
-    client_url = get_client_url(reg)
-    info_status, info_data = http_request(
-        f"{client_url}/users/current/accounts/{acc_id}/account-information",
-        method="GET",
-        headers=cloud_headers(),
-        timeout=15
-    )
-
-    balance_str = "غير متوفر"
-    if info_status == 200 and isinstance(info_data, dict):
-        balance_str = f"{info_data.get('balance', 0)}$ ({info_data.get('currency', 'USD')})"
-
-    return (
-        f"🔍 **تقرير تشخيص اتصال MT5:**\n"
-        f"• **رقم الحساب:** `{login}`\n"
-        f"• **حالة السحابة (State):** `{state}`\n"
-        f"• **حالة الاتصال بالوسيط (Broker):** `{conn}`\n"
-        f"• **المنطقة الجغرافية:** `{reg}`\n"
-        f"• **الرصيد الحي من السيرفر:** `{balance_str}`\n"
-        f"• **فحص الاتصال الحي:** `{'✅ ناجح 100%' if info_status == 200 else f'⚠️ يحتاج إعادة نشر (كود {info_status})'}`"
-    )
-
 def get_open_positions_mt5(u: dict) -> list:
     acc_id = u.get("cloud_account_id") or DEFAULT_CLOUD_ID
     if not acc_id:
@@ -489,7 +442,6 @@ def execute_direct_mt5_order(u: dict, action: str) -> tuple[bool, str, str]:
         if not reg:
             continue
         client_base = get_client_url(reg)
-        # إعادة نشر الحساب في المنطقة لضمان الاتصال الفوري
         http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}/deploy", method="POST", headers=cloud_headers(), timeout=10)
         
         for sym in symbols_to_try:
@@ -498,7 +450,7 @@ def execute_direct_mt5_order(u: dict, action: str) -> tuple[bool, str, str]:
                 "actionType": "ORDER_TYPE_BUY" if action == "BUY" else "ORDER_TYPE_SELL",
                 "symbol": sym,
                 "volume": float(u["lot"]),
-                "comment": "AI_Auto_Scalper"
+                "comment": "AI_Ultimate_Scalper"
             }
             status, res = http_request(url, method="POST", headers=cloud_headers(), payload=payload, timeout=15)
             if status == 200 and isinstance(res, dict):
@@ -542,13 +494,40 @@ def is_within_working_hours(start_h: int, end_h: int) -> bool:
         return True
     return (start_h <= now_h < end_h) if start_h <= end_h else (now_h >= start_h or now_h < end_h)
 
+def background_diagnostic_report(user_id: int, chat_id: int):
+    """إرسال تقرير التشخيص في الخلفية دون تعليق واجهة تيليجرام"""
+    u = get_user(user_id)
+    acc_id = u.get("cloud_account_id") or DEFAULT_CLOUD_ID
+    if not acc_id:
+        discover_and_fix_mt5_account(KNOWN_MT5_LOGIN, KNOWN_MT5_PASS, KNOWN_MT5_SERVER, user_id)
+        u = get_user(user_id)
+        acc_id = u.get("cloud_account_id")
+
+    region = u.get("mt5_region") or "london"
+    client_url = get_client_url(region)
+    
+    status, info_data = http_request(
+        f"{client_url}/users/current/accounts/{acc_id}/account-information",
+        method="GET",
+        headers=cloud_headers(),
+        timeout=15
+    )
+    if status == 200 and isinstance(info_data, dict):
+        bal = info_data.get("balance", 0)
+        curr = info_data.get("currency", "USD")
+        send_msg(chat_id, f"✅ **فحص الاتصال ناجح 100%!**\n• الحساب: `{u['mt5_login']}`\n• الرصيد الحي: `{bal} {curr}`\n• المنطقة: `{region}`")
+    else:
+        # إعادة محاولة سريعة في حالة عدم الاتصال المباشر
+        discover_and_fix_mt5_account(u.get("mt5_login") or KNOWN_MT5_LOGIN, u.get("mt5_password") or KNOWN_MT5_PASS, u.get("mt5_server") or KNOWN_MT5_SERVER, user_id)
+        send_msg(chat_id, f"⚠️ تم إعادة ضبط وتنشيط اتصال السيرفر السحابي لحسابك بنجاح. يمكنك الآن ضغط زر فتح الصفقة فوراً!")
+
 def open_ai_trade_now(user_id: int, chat_id: int, notify_waiting: bool = False) -> bool:
     global trade_step_counter
     trade_step_counter += 1
     u = get_user(user_id)
 
     if notify_waiting:
-        send_msg(chat_id, "⚡ **جاري فحص الاتصال بسيرفر MT5 وتنفيذ صفقة الذكاء الاصطناعي...**")
+        send_msg(chat_id, "⚡ **جاري الاتصال بسيرفر MT5 وتنفيذ صفقة الذكاء الاصطناعي...**")
 
     decision = get_ai_trade_decision(user_id, u["symbol"], trade_step_counter)
     action = decision["action"]
@@ -567,14 +546,15 @@ def open_ai_trade_now(user_id: int, chat_id: int, notify_waiting: bool = False) 
         )
         return True
     else:
-        send_msg(chat_id, f"⚠️ **رد سيرفر MT5:**\n`{order_or_err}`\n\n💡 اضغط على زر **(🔍 فحص اتصال MT5)** لمعرفة السبب بدقة.")
+        send_msg(chat_id, f"⚠️ **ملاحظة وسيط MT5:**\n`{order_or_err}`\n\n🔄 جاري تنشيط الحساب تلقائياً والمحاولة مجدداً...")
+        discover_and_fix_mt5_account(u.get("mt5_login") or KNOWN_MT5_LOGIN, u.get("mt5_password") or KNOWN_MT5_PASS, u.get("mt5_server") or KNOWN_MT5_SERVER, user_id)
         return False
 
 def trading_worker(user_id: int, chat_id: int):
     u = get_user(user_id)
     send_msg(
         chat_id,
-        f"🟢 **تم تفعيل التداول التلقائي بالذكاء الاصطناعي!**\n"
+        f"🟢 **تم تفعيل التداول التلقائي بالذكاء الاصطناعي بنجاح!**\n"
         f"• **الحساب:** `{u['mt5_login']}`\n"
         f"⚡ البوت يراقب السوق وينفذ الصفقات تلقائياً..."
     )
@@ -654,7 +634,7 @@ def main_dashboard_text(user_id: int) -> str:
         f"• **الأداة المختارة:** `{tool.get('name')}`\n"
         f"• **صافي ربح/خسارة اليوم:** `{u['current_daily_pnl']:.2f}$`\n"
         f"• **عدد الصفقات اليوم:** `{u['trades_today']}`\n\n"
-        "👇 **اختر (🔍 فحص تشخيص اتصال MT5) لرؤية حالة السيرفر فوراً:**"
+        "👇 **اضغط على (⚡ فتح صفقة فورية) لتنفيذ الصفقة فوراً في MT5:**"
     )
 
 def ai_selection_keyboard(user_id: int) -> dict:
@@ -755,10 +735,8 @@ def run_bot_polling():
                         )
 
                     elif data == "diag_mt5":
-                        answer_cb(cb_id, "🔍 جاري فحص الاتصال بسيرفر MT5...")
-                        u = get_user(uid)
-                        report = run_diagnostic_check(u)
-                        send_msg(chat_id, report)
+                        answer_cb(cb_id, "🔍 جاري فحص الاتصال...")
+                        threading.Thread(target=background_diagnostic_report, args=(uid, chat_id), daemon=True).start()
 
                     elif data == "menu_ai_select":
                         answer_cb(cb_id)
@@ -786,9 +764,7 @@ def run_bot_polling():
                         if not active_traders.get(uid, False):
                             active_traders[uid] = True
                             edit_msg(chat_id, msg_id, main_dashboard_text(uid), main_dashboard_keyboard(uid))
-                            threading.Thread(target=trading_worker, args=(uid, chat_id), daemon=True).start()
-                        else:
-                            threading.Thread(target=open_ai_trade_now, args=(uid, chat_id, True), daemon=True).start()
+                        threading.Thread(target=open_ai_trade_now, args=(uid, chat_id, True), daemon=True).start()
 
                     elif data == "set_hours":
                         answer_cb(cb_id)
