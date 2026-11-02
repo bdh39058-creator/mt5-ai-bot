@@ -40,7 +40,7 @@ def start_keep_alive():
             continue
 
 
-# ================= 2. قراءة المفاتيح السرية وبيانات الحساب الصحيحة =================
+# ================= 2. قراءة المفاتيح السرية والثوابت =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 MASTER_METAAPI_TOKEN = os.getenv("METAAPI_TOKEN", "").strip()
 SECRET_ACCESS_KEY = os.getenv("SECRET_ACCESS_KEY", "vip_secret_99").strip()
@@ -66,7 +66,7 @@ KNOWN_MT5_SERVER = "MetaQuotes-Demo"
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 
-# ================= 3. دوال الاتصال الشبكي الآمن وضمان وصول رسائل تيليجرام =================
+# ================= 3. دوال الاتصال الشبكي الآمن =================
 def http_request(url: str, method: str = "GET", headers: dict = None, payload: dict = None, timeout: int = 15):
     req_headers = {"User-Agent": BROWSER_UA, "Accept": "application/json"}
     if headers:
@@ -134,7 +134,7 @@ def delete_msg(chat_id: int, message_id: int):
     return tg_api("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
 
 
-# ================= 4. قاعدة البيانات وإعدادات المستخدم والأدوات العشر =================
+# ================= 4. قاعدة البيانات وإدارة الأدوات =================
 DEFAULT_CLOUD_LOGIN = KNOWN_MT5_LOGIN
 DEFAULT_CLOUD_PASS = KNOWN_MT5_PASS
 DEFAULT_CLOUD_SERVER = KNOWN_MT5_SERVER
@@ -266,7 +266,7 @@ def get_ai_tool_by_id(tool_id: int) -> dict:
     return dict(row) if row else {}
 
 
-# ================= 5. محلل مدخلات حساب MT5 (3 أسطر تحت بعضها أو بفاصلة) =================
+# ================= 5. تحليل بيانات الحساب (3 أسطر) =================
 def parse_mt5_credentials(raw_text: str) -> tuple[bool, str, str, str]:
     lines = [line.strip() for line in raw_text.strip().splitlines() if line.strip()]
     if len(lines) >= 3:
@@ -287,7 +287,7 @@ def parse_mt5_credentials(raw_text: str) -> tuple[bool, str, str, str]:
     return False, "", "", ""
 
 
-# ================= 6. محرك الذكاء الاصطناعي (10 أدوات) =================
+# ================= 6. محرك الذكاء الاصطناعي =================
 def raw_ai_request(tool: dict, prompt: str, max_tokens: int = 80) -> tuple[bool, str]:
     if not tool or not tool.get("api_key"):
         return False, ""
@@ -355,7 +355,7 @@ def get_ai_trade_decision(user_id: int, symbol: str, market_info: str, step_coun
     }
 
 
-# ================= 7. الربط الحقيقي المباشر بحسابات MT5 عبر النطاق الصحيح لـ MetaApi =================
+# ================= 7. الربط الآمن المتوافق مع MetaApi =================
 PROVISION_URL = "https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai"
 
 def cloud_headers(with_tx: bool = False) -> dict:
@@ -365,7 +365,6 @@ def cloud_headers(with_tx: bool = False) -> dict:
     return h
 
 def get_client_url(region: str) -> str:
-    """النطاق الصحيح 100% لخادم تنفيذ الصفقات في MetaApi (ينتهي بـ .agiliumtrade.agiliumtrade.ai)"""
     reg = (region or "vint-hill").strip()
     host_double = f"mt-client-api-v1.{reg}.agiliumtrade.agiliumtrade.ai"
     try:
@@ -373,15 +372,9 @@ def get_client_url(region: str) -> str:
         return f"https://{host_double}"
     except Exception:
         pass
-    host_default = "mt-client-api-v1.agiliumtrade.agiliumtrade.ai"
-    try:
-        socket.gethostbyname(host_default)
-        return f"https://{host_default}"
-    except Exception:
-        return f"https://{host_double}"
+    return f"https://mt-client-api-v1.agiliumtrade.agiliumtrade.ai"
 
 def fast_discover_existing_account(login: str) -> tuple[bool, str, str, str, str]:
-    """استرجاع معرف الحساب في ثانية واحدة دون أي انتظار"""
     global DEFAULT_CLOUD_ID, DEFAULT_CLOUD_REGION, DEFAULT_CLOUD_LOGIN
     if not MASTER_METAAPI_TOKEN:
         return False, "", "vint-hill", "NO_TOKEN", "DISCONNECTED"
@@ -423,69 +416,58 @@ def link_and_verify_mt5_account(login: str, password: str, server: str, user_id:
     if not MASTER_METAAPI_TOKEN:
         return False, "مفتاح METAAPI_TOKEN غير موجود في إعدادات Render."
 
-    status_list, existing = http_request(
-        f"{PROVISION_URL}/users/current/accounts",
-        method="GET",
-        headers=cloud_headers(),
-        timeout=15
-    )
-    if status_list != 200 or not isinstance(existing, list):
-        err = existing.get("error", str(existing)) if isinstance(existing, dict) else str(existing)
-        return False, f"تعذر الوصول إلى MetaApi (كود {status_list}): {err}"
-
-    target_acc = None
-    for acc in existing:
-        acc_login = str(acc.get("login", ""))
-        acc_id = str(acc.get("id", ""))
-        if acc_login == str(login):
-            target_acc = acc
-        else:
-            if acc.get("state") in ["DEPLOYED", "DEPLOYING"]:
-                http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}/undeploy", method="POST", headers=cloud_headers(), timeout=10)
-
-    if target_acc:
-        acc_id = str(target_acc["id"])
-        region = str(target_acc.get("region", "vint-hill"))
-        conn_status = str(target_acc.get("connectionStatus", "DISCONNECTED"))
-        if force_update or conn_status != "CONNECTED":
-            upd_payload = {
-                "name": f"MT5_{login}",
-                "password": password,
-                "server": server,
-                "magic": 990011
-            }
-            http_request(
-                f"{PROVISION_URL}/users/current/accounts/{acc_id}",
-                method="PUT",
-                headers=cloud_headers(),
-                payload=upd_payload,
-                timeout=15
-            )
+    # محاولة سريعة لإيجاد الحساب واستخدامه مباشرة لتفادي مشاكل الإنشاء المتكرر
+    ok_disc, acc_id, region, state, _ = fast_discover_existing_account(login)
+    if ok_disc and acc_id:
+        DEFAULT_CLOUD_ID = acc_id
+        DEFAULT_CLOUD_REGION = region
+        DEFAULT_CLOUD_LOGIN = login
+        DEFAULT_CLOUD_PASS = password
+        DEFAULT_CLOUD_SERVER = server
+        sync_all_users_cloud_id(login, password, server, acc_id, region)
+        
+        # نشر وتفعيل الحساب الموجود
         http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}/deploy", method="POST", headers=cloud_headers(), timeout=12)
-    else:
-        payload = {
-            "name": f"MT5_{login}",
-            "type": "cloud",
-            "login": str(login),
-            "password": password,
-            "server": server,
-            "platform": "mt5",
-            "magic": 990011
-        }
-        status_create, res_create = http_request(
-            f"{PROVISION_URL}/users/current/accounts",
-            method="POST",
-            headers=cloud_headers(with_tx=True),
-            payload=payload,
-            timeout=40
-        )
-        if status_create in [200, 201, 202] and isinstance(res_create, dict) and "id" in res_create:
-            acc_id = str(res_create["id"])
-            region = str(res_create.get("region", "vint-hill"))
-            http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}/deploy", method="POST", headers=cloud_headers(), timeout=12)
-        else:
+        if user_id:
+            update_user(user_id, "mt5_login", str(login))
+            update_user(user_id, "mt5_password", str(password))
+            update_user(user_id, "mt5_server", str(server))
+            update_user(user_id, "cloud_account_id", acc_id)
+            update_user(user_id, "mt5_region", region)
+        return True, f"تم ربط وتفعيل حساب MT5 ({login}) بنجاح تام!"
+
+    # إذا لم يوجد، نقوم بإنشائه بالطريقة القياسية
+    payload = {
+        "name": f"MT5_{login}",
+        "type": "cloud",
+        "login": str(login),
+        "password": password,
+        "server": server,
+        "platform": "mt5",
+        "magic": 990011
+    }
+    status_create, res_create = http_request(
+        f"{PROVISION_URL}/users/current/accounts",
+        method="POST",
+        headers=cloud_headers(with_tx=True),
+        payload=payload,
+        timeout=40
+    )
+    
+    acc_id = ""
+    region = "vint-hill"
+    if status_create in [200, 201, 202] and isinstance(res_create, dict):
+        acc_id = str(res_create.get("id", ""))
+        region = str(res_create.get("region", "vint-hill"))
+
+    if not acc_id:
+        # جلب أحدث حساب تم إنشاؤه في المنصة
+        ok_ref, acc_id, region, _, _ = fast_discover_existing_account(login)
+        if not ok_ref or not acc_id:
             err = res_create.get("error", str(res_create)) if isinstance(res_create, dict) else str(res_create)
-            return False, f"رفض سيرفر MetaApi إنشاء الحساب: {err}"
+            return False, f"تعذر استخراج معرف الحساب (id): {err}"
+
+    http_request(f"{PROVISION_URL}/users/current/accounts/{acc_id}/deploy", method="POST", headers=cloud_headers(), timeout=12)
 
     DEFAULT_CLOUD_LOGIN = str(login)
     DEFAULT_CLOUD_PASS = str(password)
@@ -494,7 +476,14 @@ def link_and_verify_mt5_account(login: str, password: str, server: str, user_id:
     DEFAULT_CLOUD_REGION = region
     sync_all_users_cloud_id(login, password, server, acc_id, region)
 
-    return True, f"تم ربط وتحديث حساب MT5 ({login}) على المنطقة السحابية ({region}) بنجاح!"
+    if user_id:
+        update_user(user_id, "mt5_login", str(login))
+        update_user(user_id, "mt5_password", str(password))
+        update_user(user_id, "mt5_server", str(server))
+        update_user(user_id, "cloud_account_id", acc_id)
+        update_user(user_id, "mt5_region", region)
+
+    return True, f"تم ربط حساب MT5 ({login}) على السحابة بنجاح!"
 
 def get_open_positions_mt5(u: dict) -> list:
     acc_id = u.get("cloud_account_id") or DEFAULT_CLOUD_ID
@@ -544,16 +533,10 @@ def fetch_live_price_mt5(u: dict, symbol: str) -> tuple[float, str]:
     return 0.0, f"Symbol:{symbol}"
 
 def execute_real_mt5_order(u: dict, action: str) -> tuple[bool, str, str, float]:
-    """إرسال أمر التداول المباشر إلى سيرفر MT5 عبر النطاق الصحيح .agiliumtrade.agiliumtrade.ai"""
     login = u.get("mt5_login") or KNOWN_MT5_LOGIN
     ok_disc, acc_id, reg, state, conn_status = fast_discover_existing_account(login)
     if not ok_disc or not acc_id:
-        return False, u["symbol"], f"لم يتم العثور على الحساب في MetaApi ({state}). اضغط على إضافة حساب MT5.", float(u["lot"])
-
-    if conn_status != "CONNECTED":
-        # انتظار قصير لمدة 6 ثوانٍ فقط في حال كان السيرفر يعيد الاتصال
-        time.sleep(6)
-        _, acc_id, reg, state, conn_status = fast_discover_existing_account(login)
+        return False, u["symbol"], f"لم يتم العثور على الحساب في MetaApi. اضغط على (إضافة حساب MT5).", float(u["lot"])
 
     client_base = get_client_url(reg)
     trade_url = f"{client_base}/users/current/accounts/{acc_id}/trade"
@@ -590,7 +573,7 @@ def execute_real_mt5_order(u: dict, action: str) -> tuple[bool, str, str, float]
     return False, u["symbol"], last_error, user_lot
 
 
-# ================= 8. محرك التداول الآلي والتشخيص الفوري بالرسائل الحية =================
+# ================= 8. محرك التداول الآلي والتشخيص =================
 authorized_users = set()
 active_traders = {}
 pending_input = {}
@@ -616,23 +599,19 @@ def is_within_working_hours(start_h: int, end_h: int) -> bool:
     return (start_h <= now_h < end_h) if start_h <= end_h else (now_h >= start_h or now_h < end_h)
 
 def async_diagnostic_worker(uid: int, chat_id: int):
-    """فحص سريع ومباشر يحدث الرسالة أمامك خلال 3 ثوانٍ"""
-    sent = send_msg(chat_id, "⏳ خطوة 1/2: جاري فحص الحساب في سحابة MetaApi...")
+    sent = send_msg(chat_id, "⏳ جاري فحص حساب MT5 والرصيد الحي...")
     msg_id = sent.get("result", {}).get("message_id") if isinstance(sent, dict) else None
     try:
         u = get_user(uid)
         login = u.get("mt5_login") or KNOWN_MT5_LOGIN
         ok, acc_id, reg, state, conn_status = fast_discover_existing_account(login)
         if not ok or not acc_id:
-            txt = f"❌ لم يتم العثور على الحساب ({login}) في MetaApi.\nالحالة: {state}\nيرجى إرسال بيانات الحساب من زر (إضافة حساب MT5)."
+            txt = f"❌ الحساب غير مسجل في MetaApi.\nيرجى إرسال بيانات الحساب من زر (إضافة حساب MT5)."
             if msg_id:
                 edit_msg(chat_id, msg_id, txt, main_dashboard_keyboard(uid))
             else:
                 send_msg(chat_id, txt, main_dashboard_keyboard(uid))
             return
-
-        if msg_id:
-            edit_msg(chat_id, msg_id, f"⏳ خطوة 2/2: تم إيجاد الحساب ({login}) في منطقة ({reg}) بحالة ({conn_status})... جاري سحب الرصيد الحي من MT5...")
 
         client_base = get_client_url(reg)
         info_st, info_res = http_request(
@@ -650,22 +629,19 @@ def async_diagnostic_worker(uid: int, chat_id: int):
                 f"✅ اتصال MT5 حي ومكتمل 100%!\n\n"
                 f"• رقم الحساب: {login}\n"
                 f"• السيرفر: {broker_srv}\n"
-                f"• المنطقة السحابية: {reg}\n"
+                f"• المنطقة: {reg}\n"
                 f"• حالة الاتصال: {state} | {conn_status}\n"
-                f"• الرصيد الحالي (Balance): {bal} {curr}\n"
-                f"• السيولة الحية (Equity): {eq} {curr}\n\n"
-                f"🚀 البوت متصل فعلياً بحسابك وجاهز لفتح الصفقات الآن!"
+                f"• الرصيد الحالي: {bal} {curr}\n"
+                f"• السيولة الحية: {eq} {curr}\n\n"
+                f"🚀 البوت متصل تماماً وجاهز للتداول!"
             )
         else:
-            err_detail = info_res.get("error", str(info_res)) if isinstance(info_res, dict) else str(info_res)
             report = (
-                f"🔍 تقرير تشخيص حساب MT5:\n\n"
+                f"🔍 تقرير حالة حساب MT5:\n\n"
                 f"• رقم الحساب: {login}\n"
-                f"• المنطقة السحابية: {reg}\n"
-                f"• حالة السحابة: {state}\n"
-                f"• حالة الاتصال بسيرفر MT5: {conn_status}\n"
-                f"• رد السيرفر الحي (كود {info_st}): {err_detail}\n\n"
-                f"💡 إذا كانت الحالة DISCONNECTED فهذا يعني أن السحابة تقوم بتسجيل الدخول الآن (انتظر 20 ثانية وأعد الفحص، أو أعد إرسال كلمة المرور من زر إضافة حساب MT5)."
+                f"• المنطقة: {reg}\n"
+                f"• حالة السحابة: {state} | الاتصال: {conn_status}\n"
+                f"• ملاحظة: الحساب قيد المزامنة مع سيرفر الوسيط."
             )
 
         if msg_id:
@@ -682,7 +658,7 @@ def open_ai_trade_now(user_id: int, chat_id: int, notify_waiting: bool = False) 
         u = get_user(user_id)
         msg_id = None
         if notify_waiting:
-            sent = send_msg(chat_id, f"⚡ جاري تحليل السوق وإرسال أمر التداول المباشر إلى حسابك ({u['mt5_login']})...")
+            sent = send_msg(chat_id, f"⚡ جاري إرسال أمر التداول المباشر إلى حسابك ({u['mt5_login']})...")
             msg_id = sent.get("result", {}).get("message_id") if isinstance(sent, dict) else None
 
         live_price, market_ctx = fetch_live_price_mt5(u, u["symbol"])
@@ -695,16 +671,14 @@ def open_ai_trade_now(user_id: int, chat_id: int, notify_waiting: bool = False) 
                 update_user(user_id, "symbol", exec_sym)
             if used_lot != float(u["lot"]):
                 update_user(user_id, "lot", used_lot)
-            price_txt = f"{live_price}" if live_price > 0 else "سعر السوق الفوري"
             success_txt = (
                 f"✅ تم فتح صفقة حقيقية بنجاح في حسابك MT5!\n\n"
                 f"• رقم الحساب: {u['mt5_login']}\n"
                 f"• نوع العملية: {action}\n"
                 f"• الزوج: {exec_sym} | حجم العقد: {used_lot}\n"
-                f"• سعر الدخول: {price_txt}\n"
-                f"• رقم التذكرة في MT5: #{order_or_err}\n"
-                f"• أداة الذكاء الاصطناعي: {decision['provider_name']} (ثقة {decision['confidence']}%)\n"
-                f"🎯 يراقب البوت الصفقة الآن لإغلاقها تلقائياً عند ربح +{u['trade_tp_usd']}$ أو خسارة -{u['trade_sl_usd']}$"
+                f"• رقم التذكرة: #{order_or_err}\n"
+                f"• الأداة: {decision['provider_name']} (ثقة {decision['confidence']}%)\n"
+                f"🎯 يراقب البوت الصفقة لإغلاقها تلقائياً عند ربح +{u['trade_tp_usd']}$ أو خسارة -{u['trade_sl_usd']}$"
             )
             if msg_id:
                 edit_msg(chat_id, msg_id, success_txt)
@@ -712,18 +686,14 @@ def open_ai_trade_now(user_id: int, chat_id: int, notify_waiting: bool = False) 
                 send_msg(chat_id, success_txt)
             return True
         else:
-            fail_txt = (
-                f"⚠️ لم يقبل سيرفر MT5 فتح الصفقة الآن:\n"
-                f"السبب: {order_or_err}\n\n"
-                f"👇 اضغط على (🔍 فحص وتشخيص اتصال MT5 الآن) لرؤية حالة الرصيد والاتصال."
-            )
+            fail_txt = f"⚠️ تعذر فتح الصفقة:\n{order_or_err}\n\n💡 اضغط على (🔍 فحص وتشخيص اتصال MT5 الآن)."
             if msg_id:
                 edit_msg(chat_id, msg_id, fail_txt)
             else:
                 send_msg(chat_id, fail_txt)
             return False
     except Exception as e:
-        send_msg(chat_id, f"⚠️ حدث خطأ أثناء إرسال الصفقة: {e}")
+        send_msg(chat_id, f"⚠️ خطأ أثناء فتح الصفقة: {e}")
         return False
 
 def trading_worker(user_id: int, chat_id: int):
@@ -731,10 +701,10 @@ def trading_worker(user_id: int, chat_id: int):
     tool_name = get_ai_tool_by_id(u["selected_ai_id"]).get("name", "AI")
     send_msg(
         chat_id,
-        f"🟢 بدأ الذكاء الاصطناعي بالتداول التلقائي الكامل على حسابك MT5!\n"
+        f"🟢 بدأ التداول التلقائي بالذكاء الاصطناعي على حسابك MT5!\n"
         f"• الحساب: {u['mt5_login']} ({u['mt5_server']})\n"
         f"• الأداة النشطة: {tool_name}\n"
-        f"⚡ جاري تنفيذ ومراقبة الصفقات الآن..."
+        f"⚡ البوت يراقب السوق وينفذ الصفقات الآن..."
     )
 
     first_attempt = True
@@ -743,11 +713,11 @@ def trading_worker(user_id: int, chat_id: int):
             u = get_user(user_id)
             if u["current_daily_pnl"] >= u["daily_max_profit"]:
                 active_traders[user_id] = False
-                send_msg(chat_id, f"🏆 تحقق الهدف اليومي (+{u['current_daily_pnl']:.2f}$) وتوقف البوت تلقائياً لحفظ أرباحك!")
+                send_msg(chat_id, f"🏆 تحقق الهدف اليومي وتوقف البوت لحفظ أرباحك!")
                 break
             if u["current_daily_pnl"] <= -abs(u["daily_max_loss"]):
                 active_traders[user_id] = False
-                send_msg(chat_id, f"🛡️ وصلت الخسارة للحد اليومي ({u['current_daily_pnl']:.2f}$) وتوقف البوت لحماية رأس مالك!")
+                send_msg(chat_id, f"🛡️ وصلت الخسارة للحد اليومي وتوقف البوت لحماية رأس مالك!")
                 break
 
             positions = get_open_positions_mt5(u)
@@ -764,9 +734,7 @@ def trading_worker(user_id: int, chat_id: int):
                             send_msg(
                                 chat_id,
                                 f"{icon} أغلق الذكاء الاصطناعي الصفقة في MT5!\n"
-                                f"• الزوج: {pos.get('symbol', u['symbol'])}\n"
-                                f"• ربح/خسارة الصفقة: {pnl:.2f}$\n"
-                                f"• إجمالي حصيلة اليوم: {new_pnl:.2f}$ ({new_cnt} صفقات)"
+                                f"• النتيجة: {pnl:.2f}$ | الإجمالي: {new_pnl:.2f}$"
                             )
             else:
                 if is_within_working_hours(u["work_start_hour"], u["work_end_hour"]):
@@ -781,7 +749,7 @@ def trading_worker(user_id: int, chat_id: int):
         time.sleep(3.0)
 
 
-# ================= 9. لوحة التحكم الشاملة في تيليجرام =================
+# ================= 9. لوحة التحكم في تيليجرام =================
 def main_dashboard_keyboard(user_id: int) -> dict:
     u = get_user(user_id)
     tool = get_ai_tool_by_id(u["selected_ai_id"])
@@ -877,10 +845,7 @@ def run_bot_polling():
                             ok_parse, login, password, server = parse_mt5_credentials(text)
                             if ok_parse:
                                 delete_msg(chat_id, msg["message_id"])
-                                send_msg(
-                                    chat_id,
-                                    f"⏳ جاري ربط حساب MT5 ({login}) على سيرفر ({server}) بالذكاء الاصطناعي..."
-                                )
+                                send_msg(chat_id, f"⏳ جاري ربط حساب MT5 ({login}) بالذكاء الاصطناعي...")
                                 threading.Thread(
                                     target=async_link_worker,
                                     args=(uid, chat_id, login, password, server),
@@ -913,7 +878,7 @@ def run_bot_polling():
                                 pending_input.pop(uid, None)
                                 send_msg(chat_id, "✅ تم التحديث بنجاح!", main_dashboard_keyboard(uid))
                             except ValueError:
-                                send_msg(chat_id, "⚠️ أرسل رقماً صحيحاً (مثال: 0.01).")
+                                send_msg(chat_id, "⚠️ أرسل رقماً صحيحاً.")
 
                 elif "callback_query" in upd:
                     cb = upd["callback_query"]
@@ -937,10 +902,6 @@ def run_bot_polling():
                             chat_id, msg_id,
                             "🔗 إضافة حساب MT5:\n"
                             "أرسل بيانات حسابك في 3 أسطر تحت بعضها هكذا:\n\n"
-                            "اسم المستخدم\n"
-                            "كلمة المرور\n"
-                            "السيرفر\n\n"
-                            "مثال جاهز للنسخ:\n"
                             "5058253637\n"
                             "*aGm1cNp\n"
                             "MetaQuotes-Demo",
@@ -953,23 +914,14 @@ def run_bot_polling():
 
                     elif data == "menu_ai_select":
                         answer_cb(cb_id)
-                        edit_msg(
-                            chat_id, msg_id,
-                            "🤖 اختر أداة الذكاء الاصطناعي للتداول والتحكم بحسابك (جميع الأدوات الـ 10 مفعلة 🟢):",
-                            ai_selection_keyboard(uid)
-                        )
+                        edit_msg(chat_id, msg_id, "🤖 اختر أداة الذكاء الاصطناعي:", ai_selection_keyboard(uid))
 
                     elif data.startswith("pick_ai_"):
                         tool_id = int(data.split("_")[-1])
                         tool = get_ai_tool_by_id(tool_id)
                         answer_cb(cb_id, f"✅ تم تفعيل {tool['name']}")
                         update_user(uid, "selected_ai_id", tool_id)
-                        edit_msg(
-                            chat_id,
-                            msg_id,
-                            f"✅ تم تفعيل ({tool['name']}) بنجاح!\n\n{main_dashboard_text(uid)}",
-                            main_dashboard_keyboard(uid)
-                        )
+                        edit_msg(chat_id, msg_id, f"✅ تم تفعيل ({tool['name']}) بنجاح!\n\n{main_dashboard_text(uid)}", main_dashboard_keyboard(uid))
 
                     elif data == "instant_trade":
                         answer_cb(cb_id, "⚡ جاري إرسال الصفقة فوراً...")
@@ -983,11 +935,7 @@ def run_bot_polling():
                     elif data == "set_hours":
                         answer_cb(cb_id)
                         pending_input[uid] = "input_hours"
-                        edit_msg(
-                            chat_id, msg_id,
-                            "⏰ أرسل ساعة البدء والانتهاء (مثال: 8-22 أو 0-24):",
-                            {"inline_keyboard": [[{"text": "🔙 رجوع", "callback_data": "back_home"}]]}
-                        )
+                        edit_msg(chat_id, msg_id, "⏰ أرسل ساعة البدء والانتهاء (مثال: 8-22):", {"inline_keyboard": [[{"text": "🔙 رجوع", "callback_data": "back_home"}]]})
 
                     elif data == "emergency_close":
                         u = get_user(uid)
@@ -995,18 +943,18 @@ def run_bot_polling():
                         active_traders[uid] = False
                         cnt, pnl = emergency_close_all_mt5(u)
                         update_user(uid, "current_daily_pnl", u["current_daily_pnl"] + pnl)
-                        send_msg(chat_id, f"🚨 تم إغلاق {cnt} صفقات مفتوحة في MT5 فوراً! الصافي: {pnl:.2f}$")
+                        send_msg(chat_id, f"🚨 تم إغلاق {cnt} صفقات في MT5! الصافي: {pnl:.2f}$")
                         edit_msg(chat_id, msg_id, main_dashboard_text(uid), main_dashboard_keyboard(uid))
 
                     elif data in ["set_lot", "set_symbol", "set_tp", "set_sl", "set_daily_tp", "set_daily_sl"]:
                         answer_cb(cb_id)
                         mapping = {
-                            "set_lot": ("lot", "💵 أرسل حجم الدخول اللوت (مثال: 0.01):"),
-                            "set_symbol": ("symbol", "📊 أرسل رمز الزوج كما يظهر في MT5 (مثال: XAUUSD أو EURUSD):"),
+                            "set_lot": ("lot", "💵 أرسل حجم الدخول (مثال: 0.01):"),
+                            "set_symbol": ("symbol", "📊 أرسل رمز الزوج (مثال: XAUUSD):"),
                             "set_tp": ("trade_tp_usd", "🎯 أرسل ربح الصفقة بالدولار (مثال: 0.50):"),
                             "set_sl": ("trade_sl_usd", "🛑 أرسل خسارة الصفقة بالدولار (مثال: 1.00):"),
-                            "set_daily_tp": ("daily_max_profit", "🏆 أرسل أقصى ربح يومي بالدولار (مثال: 20):"),
-                            "set_daily_sl": ("daily_max_loss", "🛡️ أرسل أقصى خسارة يومية بالدولار (مثال: 10):"),
+                            "set_daily_tp": ("daily_max_profit", "🏆 أقصى ربح يومي بالدولار (مثال: 20):"),
+                            "set_daily_sl": ("daily_max_loss", "🛡️ أقصى خسارة يومية بالدولار (مثال: 10):"),
                         }
                         f_name, txt = mapping[data]
                         pending_input[uid] = f"field_{f_name}"
@@ -1034,8 +982,8 @@ def run_bot_polling():
 if __name__ == "__main__":
     init_db()
     threading.Thread(
-        target=fast_discover_existing_account,
-        args=(KNOWN_MT5_LOGIN,),
+        target=link_and_verify_mt5_account,
+        args=(KNOWN_MT5_LOGIN, KNOWN_MT5_PASS, KNOWN_MT5_SERVER),
         daemon=True
     ).start()
     start_keep_alive()
