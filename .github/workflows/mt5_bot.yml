@@ -57,6 +57,9 @@ jobs:
           OPENROUTER1_TOKEN: ${{ secrets.OPENROUTER1_TOKEN }}
           HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
           SAMBANOVA_TOKEN: ${{ secrets.SAMBANOVA_TOKEN }}
+          METAAPI_TOKEN: ${{ secrets.METAAPI_TOKEN }}
+          BYBIT_API_KEY: ${{ secrets.BYBIT_API_KEY }}
+          BYBIT_API_SECRET: ${{ secrets.BYBIT_API_SECRET }}
         run: |
           python -X utf8 main.py
 
