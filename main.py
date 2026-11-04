@@ -15,7 +15,7 @@ import urllib.error
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# ================= 0. حل جذري نهائي لمشكلة الترميز في ويندوز (UnicodeEncodeError) =================
+# ================= 0. حل جذري نهائي لمشكلة الترميز وتفعيل العربية =================
 os.environ["PYTHONIOENCODING"] = "utf-8"
 try:
     if hasattr(sys.stdout, "reconfigure"):
@@ -89,7 +89,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write("Multi-Account AI Trading Bot is Running 24/7!".encode("utf-8"))
+        self.wfile.write("Multi-Account AI Arabic Trading Bot is Running 24/7!".encode("utf-8"))
 
     def do_HEAD(self):
         self.send_response(200)
@@ -653,7 +653,7 @@ def bybit_open_order(acc: dict, action: str, symbol: str, lot: float) -> tuple[b
     return False, bybit_sym, err, qty
 
 
-# ================= 7. المحرك الثاني: منصة MT5 المباشرة =================
+# ================= 7. المحرك الثاني: منصة MT5 المباشرة (مع التحقق الصارم من التذاكر) =================
 mt5_lock = threading.Lock()
 
 def native_mt5_connect(acc: dict) -> tuple[bool, str]:
@@ -798,7 +798,7 @@ def unified_close_position(acc: dict, pos: dict) -> bool:
     return False
 
 
-# ================= 8. محرك التداول الآلي والتحكم بتيليجرام =================
+# ================= 8. محرك التداول الآلي والتحكم بتيليجرام (باللغة العربية الكاملة) =================
 authorized_users = set()
 active_traders = {}
 pending_input = {}
@@ -817,46 +817,46 @@ def execute_ai_trade_across_accounts(user_id: int, chat_id: int, notify_start: b
     u = get_user(user_id)
     target_accounts = get_target_trading_accounts(user_id)
     if not target_accounts:
-        send_msg(chat_id, "No accounts added.")
+        send_msg(chat_id, "⚠️ لا توجد حسابات مضافة.")
         return False
 
     if notify_start:
-        send_msg(chat_id, f"Analyzing market and executing order across ({len(target_accounts)}) accounts...")
+        send_msg(chat_id, f"⚡ جاري تحليل السوق وإرسال الأمر الحقيقي إلى ({len(target_accounts)}) حساب...")
 
     decision = analyze_market_with_ai(user_id, u["symbol"])
     action = decision["action"]
     any_success = False
     report = [
-        f"AI Decision: {action} (Confidence {decision['confidence']}%)",
-        f"Tool: {decision['provider_name']}",
-        f"Indicators: {decision['indicators']}\n"
+        f"🤖 **قرار الذكاء الاصطناعي:** {action} (نسبة الثقة: {decision['confidence']}%)",
+        f"• الأداة النشطة: {decision['provider_name']}",
+        f"• المؤشرات الفنية: {decision['indicators']}\n"
     ]
 
     for acc in target_accounts:
         ok, exec_sym, order_or_err, used_lot = unified_open_order(acc, action, u["symbol"], u["lot"])
         if ok:
             any_success = True
-            report.append(f"Account [{acc['account_label']}]: SUCCESS {action} on {exec_sym} (Lot {used_lot}) | Ticket #{order_or_err}")
+            report.append(f"✅ الحساب [{acc['account_label']}]: تم تنفيذ صفقة {action} على {exec_sym} (لوت {used_lot}) | تذكرة رقم #{order_or_err}")
         else:
-            report.append(f"Account [{acc['account_label']}]: FAILED ({order_or_err})")
+            report.append(f"⚠️ الحساب [{acc['account_label']}]: تعذر التنفيذ ({order_or_err})")
 
     send_msg(chat_id, "\n".join(report))
     return any_success
 
 def trading_worker(user_id: int, chat_id: int):
     u = get_user(user_id)
-    send_msg(chat_id, "Automated AI Trading Worker Started Successfully!")
+    send_msg(chat_id, "🟢 **بدأ التداول الآلي بالذكاء الاصطناعي بنجاح!**")
     first_cycle = True
     while active_traders.get(user_id, False):
         try:
             u = get_user(user_id)
             if u["current_daily_pnl"] >= u["daily_max_profit"]:
                 active_traders[user_id] = False
-                send_msg(chat_id, "Daily profit target reached. Bot stopped.")
+                send_msg(chat_id, "🏆 تحقق الهدف اليومي للأرباح. توقف البوت لحفظ أرباحك.")
                 break
             if u["current_daily_pnl"] <= -abs(u["daily_max_loss"]):
                 active_traders[user_id] = False
-                send_msg(chat_id, "Daily loss limit reached. Bot stopped.")
+                send_msg(chat_id, "🛡️ وصلت الخسارة للحد الأقصى. توقف البوت لحماية رأس مالك.")
                 break
 
             target_accounts = get_target_trading_accounts(user_id)
@@ -873,14 +873,14 @@ def trading_worker(user_id: int, chat_id: int):
                                 new_cnt = u["trades_today"] + 1
                                 update_user(user_id, "current_daily_pnl", new_pnl)
                                 update_user(user_id, "trades_today", new_cnt)
-                                send_msg(chat_id, f"Closed position on [{acc['account_label']}]. Profit: {pnl:.2f}$ | Total Today: {new_pnl:.2f}$")
+                                send_msg(chat_id, f"💰 تم إغلاق الصفقة على [{acc['account_label']}] بربح/خسارة: {pnl:.2f}$ | الإجمالي اليوم: {new_pnl:.2f}$")
 
             if not any_open and is_within_working_hours(u["work_start_hour"], u["work_end_hour"]):
                 ok_exec = execute_ai_trade_across_accounts(user_id, chat_id, notify_start=first_cycle)
                 first_cycle = False
                 if not ok_exec:
                     active_traders[user_id] = False
-                    send_msg(chat_id, "Trading paused due to execution error.")
+                    send_msg(chat_id, "⚠️ تم إيقاف التداول مؤقتاً بسبب خطأ في تنفيذ الأوامر بالسيرفر.")
                     break
                 time.sleep(5)
         except Exception as e:
@@ -892,24 +892,24 @@ def main_dashboard_keyboard(user_id: int) -> dict:
     active_acc = get_active_account(user_id)
     all_accs = get_user_accounts(user_id)
     tool = get_ai_tool_by_id(u["selected_ai_id"])
-    run_btn = {"text": "Stop Trading", "callback_data": "toggle_run"} if active_traders.get(user_id, False) else {"text": "Start AI Trading", "callback_data": "toggle_run"}
+    run_btn = {"text": "⏹️ إيقاف التداول التلقائي", "callback_data": "toggle_run"} if active_traders.get(user_id, False) else {"text": "▶️ بدء التداول التلقائي بالذكاء الاصطناعي", "callback_data": "toggle_run"}
     return {"inline_keyboard": [
-        [{"text": "Add New Trading Account", "callback_data": "menu_add_account"}],
-        [{"text": f"Manage Accounts ({len(all_accs)}) | Active: {active_acc.get('account_label')}", "callback_data": "menu_manage_accounts"}],
-        [{"text": f"AI Engine: {tool.get('name')}", "callback_data": "menu_ai_select"}],
-        [{"text": "Diagnostic & Live Balance Check", "callback_data": "diag_all"}],
+        [{"text": "➕ إضافة حساب تداول جديد", "callback_data": "menu_add_account"}],
+        [{"text": f"📂 إدارة الحسابات ({len(all_accs)}) | النشط: {active_acc.get('account_label')}", "callback_data": "menu_manage_accounts"}],
+        [{"text": f"🤖 أداة الذكاء الاصطناعي: {tool.get('name')}", "callback_data": "menu_ai_select"}],
+        [{"text": "🔍 فحص الرصيد الحي وحالة الحسابات", "callback_data": "diag_all"}],
         [
-            {"text": f"Lot: {u['lot']}", "callback_data": "set_lot"},
-            {"text": f"Symbol: {u['symbol']}", "callback_data": "set_symbol"}
+            {"text": f"💵 اللوت: {u['lot']}", "callback_data": "set_lot"},
+            {"text": f"📊 الزوج: {u['symbol']}", "callback_data": "set_symbol"}
         ],
         [
-            {"text": f"TP: +{u['trade_tp_usd']}$", "callback_data": "set_tp"},
-            {"text": f"SL: -{u['trade_sl_usd']}$", "callback_data": "set_sl"}
+            {"text": f"🎯 الهدف: +{u['trade_tp_usd']}$", "callback_data": "set_tp"},
+            {"text": f"🛑 الوقف: -{u['trade_sl_usd']}$", "callback_data": "set_sl"}
         ],
         [run_btn],
-        [{"text": "Execute Instant Trade Now", "callback_data": "instant_trade"}],
-        [{"text": "Emergency Close All Positions", "callback_data": "emergency_close"}],
-        [{"text": "Reset Today PnL", "callback_data": "reset_pnl"}]
+        [{"text": "⚡ فتح صفقة فورية الآن", "callback_data": "instant_trade"}],
+        [{"text": "🚨 إغلاق جميع الصفقات فوراً", "callback_data": "emergency_close"}],
+        [{"text": "🔄 تصفير عداد أرباح اليوم", "callback_data": "reset_pnl"}]
     ]}
 
 def main_dashboard_text(user_id: int) -> str:
@@ -917,15 +917,15 @@ def main_dashboard_text(user_id: int) -> str:
     active_acc = get_active_account(user_id)
     all_accs = get_user_accounts(user_id)
     tool = get_ai_tool_by_id(u["selected_ai_id"])
-    state = "Running" if active_traders.get(user_id, False) else "Stopped"
+    state = "يعمل الآن 🟢" if active_traders.get(user_id, False) else "متوقف 🔴"
     return (
-        "Multi-Account AI Trading Bot Dashboard\n\n"
-        f"Status: {state}\n"
-        f"Active Account: {active_acc.get('account_label')} ({active_acc.get('server_or_mode')})\n"
-        f"Total Accounts: {len(all_accs)}\n"
-        f"AI Tool: {tool.get('name')}\n"
-        f"Today PnL: {u['current_daily_pnl']:.2f}$\n"
-        f"Trades Today: {u['trades_today']}"
+        "🤖 **لوحة تحكم بوت التداول بالذكاء الاصطناعي**\n\n"
+        f"• الحالة: {state}\n"
+        f"• الحساب النشط: {active_acc.get('account_label')} ({active_acc.get('server_or_mode')})\n"
+        f"• إجمالي الحسابات: {len(all_accs)}\n"
+        f"• أداة الذكاء الاصطناعي: {tool.get('name')}\n"
+        f"• أرباح اليوم: {u['current_daily_pnl']:.2f}$\n"
+        f"• صفقات اليوم: {u['trades_today']}"
     )
 
 def accounts_management_keyboard(user_id: int) -> dict:
@@ -934,35 +934,35 @@ def accounts_management_keyboard(user_id: int) -> dict:
     rows = []
     for a in accs:
         pk = a["acc_pk"]
-        is_act = "[ACTIVE] " if pk == u["active_account_id"] else ""
+        is_act = "🟢 [النشط] " if pk == u["active_account_id"] else ""
         rows.append([
             {"text": f"{is_act}{a['account_label']} [{a['server_or_mode']}]", "callback_data": f"select_acc_{pk}"},
-            {"text": "Delete", "callback_data": f"del_acc_{pk}"}
+            {"text": "🗑️ حذف", "callback_data": f"del_acc_{pk}"}
         ])
-    rows.append([{"text": "Add Account", "callback_data": "menu_add_account"}])
-    rows.append([{"text": "Back", "callback_data": "back_home"}])
+    rows.append([{"text": "➕ إضافة حساب", "callback_data": "menu_add_account"}])
+    rows.append([{"text": "🔙 رجوع", "callback_data": "back_home"}])
     return {"inline_keyboard": rows}
 
 def ai_selection_keyboard(user_id: int) -> dict:
     u = get_user(user_id)
     rows = []
     for t in get_ai_tools():
-        mark = "[SELECTED] " if t["id"] == u["selected_ai_id"] else ""
+        mark = "✅ " if t["id"] == u["selected_ai_id"] else ""
         rows.append([{"text": f"{mark}{t['name']}", "callback_data": f"pick_ai_{t['id']}"}])
-    rows.append([{"text": "Back", "callback_data": "back_home"}])
+    rows.append([{"text": "🔙 رجوع", "callback_data": "back_home"}])
     return {"inline_keyboard": rows}
 
 def async_diagnostic_all(uid: int, chat_id: int):
-    sent = send_msg(chat_id, "Checking status and live balance for all accounts...")
+    sent = send_msg(chat_id, "⏳ جاري فحص الرصيد الحي والاتصال لجميع الحسابات...")
     msg_id = sent.get("result", {}).get("message_id") if isinstance(sent, dict) else None
     accs = get_user_accounts(uid)
-    lines = ["Diagnostic Report:\n"]
+    lines = ["🔍 **تقرير التشخيص الفعلي:**\n"]
     for a in accs:
         ok, bal, eq, p_cnt, status_txt = unified_get_account_status(a)
         if ok:
-            lines.append(f"- {a['account_label']} ({a['server_or_mode']}): Status: {status_txt} | Balance: {bal:.2f} USD | Equity: {eq:.2f} USD | Positions: {p_cnt}")
+            lines.append(f"• {a['account_label']}: الحالة ({status_txt}) | الرصيد: {bal:.2f}$ | السيولة: {eq:.2f}$ | الصفقات المفتوحة: {p_cnt}")
         else:
-            lines.append(f"- {a['account_label']} ({a['server_or_mode']}): Status: {status_txt}")
+            lines.append(f"• {a['account_label']}: الحالة ({status_txt})")
     report = "\n".join(lines)
     if msg_id:
         edit_msg(chat_id, msg_id, report, main_dashboard_keyboard(uid))
@@ -1004,9 +1004,9 @@ def run_bot_polling():
                                 pending_input.pop(uid, None)
                                 acc_obj = get_account_by_pk(pk)
                                 ok_st, bal, eq, _, st_msg = unified_get_account_status(acc_obj)
-                                send_msg(chat_id, f"Account saved successfully! ({acc_obj['account_label']})", main_dashboard_keyboard(uid))
+                                send_msg(chat_id, f"✅ تم حفظ وتفعيل الحساب بنجاح! ({acc_obj['account_label']})", main_dashboard_keyboard(uid))
                             else:
-                                send_msg(chat_id, "Send account credentials in 3 lines:\nlogin\npassword\nserver")
+                                send_msg(chat_id, "⚠️ أرسل بيانات الحساب في 3 أسطر:\nاسم المستخدم\nكلمة المرور\nالسيرفر")
 
                         elif action.startswith("field_"):
                             field = action.replace("field_", "")
@@ -1014,9 +1014,9 @@ def run_bot_polling():
                                 val = text.upper().strip() if field == "symbol" else float(text.strip())
                                 update_user(uid, field, val)
                                 pending_input.pop(uid, None)
-                                send_msg(chat_id, "Updated successfully!", main_dashboard_keyboard(uid))
+                                send_msg(chat_id, "✅ تم التحديث بنجاح!", main_dashboard_keyboard(uid))
                             except ValueError:
-                                send_msg(chat_id, "Please send a valid number.")
+                                send_msg(chat_id, "⚠️ أرسل رقماً صحيحاً.")
 
                 elif "callback_query" in upd:
                     cb = upd["callback_query"]
@@ -1036,72 +1036,72 @@ def run_bot_polling():
                     elif data == "menu_add_account":
                         answer_cb(cb_id)
                         pending_input[uid] = "input_new_account"
-                        edit_msg(chat_id, msg_id, "Send account credentials in 3 lines:\nlogin\npassword\nserver", {"inline_keyboard": [[{"text": "Back", "callback_data": "back_home"}]]})
+                        edit_msg(chat_id, msg_id, "أرسل بيانات حسابك في 3 أسطر:\nاسم المستخدم\nكلمة المرور\nالسيرفر", {"inline_keyboard": [[{"text": "🔙 رجوع", "callback_data": "back_home"}]]})
 
                     elif data == "menu_manage_accounts":
                         answer_cb(cb_id)
-                        edit_msg(chat_id, msg_id, "Manage your added accounts:", accounts_management_keyboard(uid))
+                        edit_msg(chat_id, msg_id, "📂 إدارة الحسابات المضافة:", accounts_management_keyboard(uid))
 
                     elif data.startswith("select_acc_"):
                         pk = int(data.split("_")[-1])
                         update_user(uid, "active_account_id", pk)
-                        answer_cb(cb_id, "Switched active account")
-                        edit_msg(chat_id, msg_id, "Manage your added accounts:", accounts_management_keyboard(uid))
+                        answer_cb(cb_id, "تم التبديل بنجاح")
+                        edit_msg(chat_id, msg_id, "📂 إدارة الحسابات المضافة:", accounts_management_keyboard(uid))
 
                     elif data.startswith("del_acc_"):
                         pk = int(data.split("_")[-1])
                         if delete_trading_account(uid, pk):
-                            answer_cb(cb_id, "Account deleted")
+                            answer_cb(cb_id, "تم حذف الحساب")
                         else:
-                            answer_cb(cb_id, "Must keep at least one account", True)
-                        edit_msg(chat_id, msg_id, "Manage your added accounts:", accounts_management_keyboard(uid))
+                            answer_cb(cb_id, "يجب إبقاء حساب واحد على الأقل", True)
+                        edit_msg(chat_id, msg_id, "📂 إدارة الحسابات المضافة:", accounts_management_keyboard(uid))
 
                     elif data == "diag_all":
-                        answer_cb(cb_id, "Checking diagnostics...")
+                        answer_cb(cb_id, "جاري فحص الحسابات...")
                         threading.Thread(target=async_diagnostic_all, args=(uid, chat_id), daemon=True).start()
 
                     elif data == "menu_ai_select":
                         answer_cb(cb_id)
-                        edit_msg(chat_id, msg_id, "Select AI Engine:", ai_selection_keyboard(uid))
+                        edit_msg(chat_id, msg_id, "اختر أداة الذكاء الاصطناعي:", ai_selection_keyboard(uid))
 
                     elif data.startswith("pick_ai_"):
                         tool_id = int(data.split("_")[-1])
                         update_user(uid, "selected_ai_id", tool_id)
-                        answer_cb(cb_id, "AI Updated")
+                        answer_cb(cb_id, "تم تحديث الأداة")
                         edit_msg(chat_id, msg_id, main_dashboard_text(uid), main_dashboard_keyboard(uid))
 
                     elif data == "instant_trade":
-                        answer_cb(cb_id, "Executing trade...")
+                        answer_cb(cb_id, "جاري تنفيذ الصفقة...")
                         if not active_traders.get(uid, False):
                             active_traders[uid] = True
                             edit_msg(chat_id, msg_id, main_dashboard_text(uid), main_dashboard_keyboard(uid))
                             threading.Thread(target=trading_worker, args=(uid, chat_id), daemon=True).start()
                         else:
-                            threading.Thread(target=execute_ai_trade_exact_match if 'execute_ai_trade_exact_match' in globals() else execute_ai_trade_across_accounts, args=(uid, chat_id, True), daemon=True).start()
+                            threading.Thread(target=execute_ai_trade_across_accounts, args=(uid, chat_id, True), daemon=True).start()
 
                     elif data == "emergency_close":
-                        answer_cb(cb_id, "Closing all positions...")
+                        answer_cb(cb_id, "جاري إغلاق الصفقات...")
                         active_traders[uid] = False
-                        u = get_user(user_id=uid) if 'user_id' in globals() or 'user_id' in locals() else get_user(uid)
+                        u = get_user(uid)
                         for acc in get_user_accounts(uid):
                             for p in unified_get_positions(acc, u["symbol"]):
-                                unified_close_position(acc, p)
-                        send_msg(chat_id, "All positions closed.", main_dashboard_keyboard(uid))
+                                unified_close_position(acc, pos=p)
+                        send_msg(chat_id, "🚨 تم إغلاق جميع الصفقات المفتوحة.", main_dashboard_keyboard(uid))
 
                     elif data in ["set_lot", "set_symbol", "set_tp", "set_sl"]:
                         answer_cb(cb_id)
                         mapping = {
-                            "set_lot": ("lot", "Send lot size (e.g. 0.01):"),
-                            "set_symbol": ("symbol", "Send symbol (e.g. XAUUSD):"),
-                            "set_tp": ("trade_tp_usd", "Send TP in USD:"),
-                            "set_sl": ("trade_sl_usd", "Send SL in USD:"),
+                            "set_lot": ("lot", "أرسل حجم اللوت (مثال: 0.01):"),
+                            "set_symbol": ("symbol", "أرسل رمز الزوج (مثال: XAUUSD):"),
+                            "set_tp": ("trade_tp_usd", "أرسل هدف الربح بالدولار:"),
+                            "set_sl": ("trade_sl_usd", "أرسل وقف الخسارة بالدولار:"),
                         }
                         f_name, txt = mapping[data]
                         pending_input[uid] = f"field_{f_name}"
-                        edit_msg(chat_id, msg_id, txt, {"inline_keyboard": [[{"text": "Back", "callback_data": "back_home"}]]})
+                        edit_msg(chat_id, msg_id, txt, {"inline_keyboard": [[{"text": "🔙 رجوع", "callback_data": "back_home"}]]})
 
                     elif data == "reset_pnl":
-                        answer_cb(cb_id, "Reset")
+                        answer_cb(cb_id, "تم التصفير")
                         update_user(uid, "current_daily_pnl", 0.0)
                         update_user(uid, "trades_today", 0)
                         edit_msg(chat_id, msg_id, main_dashboard_text(uid), main_dashboard_keyboard(uid))
