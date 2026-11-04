@@ -322,7 +322,7 @@ def get_target_trading_accounts(user_id: int) -> list:
     u = get_user(user_id)
     all_accs = get_user_accounts(user_id)
     if u.get("trade_all_accounts") == 1:
-        enabled = [a for a in all_accs if a.get("is_enabled"] == 1]
+        enabled = [a for a in all_accs if a.get("is_enabled") == 1]
         return enabled if enabled else all_accs
     active = get_active_account(user_id)
     return [active] if active else all_accs
