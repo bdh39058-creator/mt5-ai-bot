@@ -1,4 +1,5 @@
 import os
+import sys
 import hmac
 import json
 import time
@@ -6,6 +7,7 @@ import uuid
 import socket
 import hashlib
 import sqlite3
+import subprocess
 import threading
 import urllib.request
 import urllib.parse
@@ -13,15 +15,78 @@ import urllib.error
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# فحص توفر مكتبة MetaTrader5 الرسمية على سيرفر ويندوز (GitHub Actions)
+# ================= 0. حل جذري لمشكلة ترميز ويندوز (UnicodeEncodeError cp1252) =================
+os.environ["PYTHONIOENCODING"] = "utf-8"
 try:
-    import MetaTrader5 as mt5
-    NATIVE_MT5_AVAILABLE = True
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
-    NATIVE_MT5_AVAILABLE = False
+    pass
+
+def safe_print(*args):
+    text = " ".join(str(a) for a in args)
+    try:
+        print(text, flush=True)
+    except Exception:
+        try:
+            sys.stdout.write(text.encode("ascii", errors="ignore").decode("ascii") + "\n")
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+# فحص وتثبيت مكتبة MetaTrader5 الرسمية وبرنامج MT5 تلقائياً على سيرفر ويندوز في GitHub Actions
+NATIVE_MT5_AVAILABLE = False
+if os.name == "nt":
+    try:
+        import MetaTrader5 as mt5
+        NATIVE_MT5_AVAILABLE = True
+    except ImportError:
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "MetaTrader5"], check=False)
+            import MetaTrader5 as mt5
+            NATIVE_MT5_AVAILABLE = True
+        except Exception:
+            NATIVE_MT5_AVAILABLE = False
+
+MT5_TERMINAL_PATHS = [
+    r"C:\Program Files\MetaTrader 5\terminal64.exe",
+    r"C:\Program Files (x86)\MetaTrader 5\terminal64.exe"
+]
+
+def find_mt5_terminal_exe() -> str:
+    for p in MT5_TERMINAL_PATHS:
+        if os.path.exists(p):
+            return p
+    return ""
+
+def ensure_windows_mt5_terminal():
+    """تحميل وتثبيت برنامج MetaTrader 5 الرسمي تلقائياً على سيرفر ويندوز في GitHub إذا لم يكن مثبتاً"""
+    if os.name != "nt":
+        return
+    if find_mt5_terminal_exe():
+        safe_print("MT5 Terminal is already installed.")
+        return
+    safe_print("Downloading and installing Official MetaTrader 5 Terminal on Windows Server...")
+    installer_path = os.path.join(os.getcwd(), "mt5setup.exe")
+    try:
+        urllib.request.urlretrieve(
+            "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe",
+            installer_path
+        )
+        subprocess.run([installer_path, "/auto"], timeout=120, check=False)
+        for _ in range(20):
+            if find_mt5_terminal_exe():
+                safe_print("MT5 Terminal installed successfully!")
+                return
+            time.sleep(2)
+    except Exception as e:
+        safe_print(f"MT5 Auto-install notice: {e}")
 
 BOT_START_TIME = time.time()
-MAX_RUNTIME_SECONDS = 340 * 60  # الإغلاق الآمن لحفظ قاعدة البيانات في GitHub Actions قبل انتهاء الـ 350 دقيقة
+MAX_RUNTIME_SECONDS = 340 * 60  # إغلاق آمن قبل انتهاء مهلة GitHub Actions
+
 
 # ================= 1. خادم الويب لإبقاء البوت شغالاً 24/7 =================
 class KeepAliveHandler(BaseHTTPRequestHandler):
@@ -29,7 +94,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write("🤖 Multi-Account AI Gold & MT5 Trading Bot is Running 24/7!".encode("utf-8"))
+        self.wfile.write("MT5 Multi-Account AI Trading Bot is Running 24/7!".encode("utf-8"))
 
     def do_HEAD(self):
         self.send_response(200)
@@ -46,7 +111,7 @@ def start_keep_alive():
             server = HTTPServer(("0.0.0.0", port), KeepAliveHandler)
             actual_port = server.server_address[1]
             threading.Thread(target=server.serve_forever, daemon=True).start()
-            print(f"🌐 خادم 24/7 يعمل الآن بنجاح على المنفذ {actual_port}")
+            safe_print(f"Keep-Alive Server running on port {actual_port}")
             return
         except Exception:
             continue
@@ -80,11 +145,6 @@ KNOWN_MT5_LOGIN = "5058253637"
 KNOWN_MT5_PASS = "*aGm1cNp"
 KNOWN_MT5_SERVER = "MetaQuotes-Demo"
 KNOWN_FALLBACK_ACC_ID = "2edd990c-e8e3-4853-98e1-867ab23136e0"
-
-MT5_TERMINAL_PATHS = [
-    r"C:\Program Files\MetaTrader 5\terminal64.exe",
-    r"C:\Program Files (x86)\MetaTrader 5\terminal64.exe"
-]
 
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
@@ -237,7 +297,6 @@ def ensure_default_account(user_id: int):
             VALUES (?, 'MT5', ?, ?, ?, ?, ?, 'london', 1)
         """, (user_id, f"MT5 ({KNOWN_MT5_LOGIN})", KNOWN_MT5_LOGIN, KNOWN_MT5_PASS, KNOWN_MT5_SERVER, KNOWN_FALLBACK_ACC_ID))
         new_pk = c.lastrowid
-        # إذا كان المستخدم قد وضع مفاتيح Bybit في Secrets نضيفها تلقائياً كحساب ثانٍ جاهز
         if ENV_BYBIT_KEY and ENV_BYBIT_SECRET:
             c.execute("""
                 INSERT INTO trading_accounts (user_id, platform, account_label, login_or_key, password_or_secret, server_or_mode, cloud_id, region, is_enabled)
@@ -368,12 +427,6 @@ def get_ai_tool_by_id(tool_id: int) -> dict:
 
 # ================= 5. محلل مدخلات الحسابات (3 أسطر تحت بعضها لـ MT5 أو Bybit) =================
 def parse_three_line_credentials(raw_text: str) -> tuple[str, str, str, str]:
-    """
-    يقبل 3 أسطر تحت بعضها:
-    اسم المستخدم
-    كلمة المرور
-    السيرفر
-    """
     cleaned = raw_text.strip()
     lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
     if len(lines) >= 3:
@@ -421,7 +474,6 @@ def calc_rsi(prices: list, period: int = 14) -> float:
     return 100.0 - (100.0 / (1.0 + rs))
 
 def fetch_live_market_indicators(symbol: str) -> tuple[float, str, str]:
-    """جلب الشموع والمؤشرات الفنية الحية من MT5 مباشرة أو من السيرفر العالمي بدون الحاجة لـ API"""
     if NATIVE_MT5_AVAILABLE:
         try:
             rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 30)
@@ -636,16 +688,15 @@ def bybit_open_order(acc: dict, action: str, symbol: str, lot: float) -> tuple[b
 PROVISION_URL = "https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai"
 mt5_lock = threading.Lock()
 
-def find_mt5_terminal_exe() -> str:
-    for p in MT5_TERMINAL_PATHS:
-        if os.path.exists(p):
-            return p
-    return ""
-
 def native_mt5_connect(acc: dict) -> tuple[bool, str]:
-    """الاتصال المباشر ببرنامج MT5 الرسمي على سيرفر ويندوز في GitHub Actions مع تحديد مسار terminal64.exe"""
+    """الاتصال المباشر ببرنامج MT5 الرسمي على سيرفر ويندوز في GitHub Actions مع التثبيت التلقائي"""
     if not NATIVE_MT5_AVAILABLE:
         return False, "مكتبة MetaTrader5 تتطلب تشغيل البوت من تبويب Actions في GitHub."
+
+    exe_path = find_mt5_terminal_exe()
+    if not exe_path:
+        ensure_windows_mt5_terminal()
+        exe_path = find_mt5_terminal_exe()
 
     login_str = str(acc.get("login_or_key", "")).strip()
     if not login_str.isdigit():
@@ -653,7 +704,6 @@ def native_mt5_connect(acc: dict) -> tuple[bool, str]:
     login_int = int(login_str)
     password = str(acc.get("password_or_secret", "")).strip()
     server = str(acc.get("server_or_mode", "")).strip()
-    exe_path = find_mt5_terminal_exe()
 
     init_kwargs = {"login": login_int, "password": password, "server": server, "timeout": 60000}
     if exe_path:
@@ -662,7 +712,6 @@ def native_mt5_connect(acc: dict) -> tuple[bool, str]:
     if mt5.initialize(**init_kwargs):
         return True, "CONNECTED_NATIVE_MT5"
 
-    # محاولة ثانية: تهيئة البرنامج أولاً ثم تسجيل الدخول للحساب
     basic_kwargs = {"path": exe_path, "timeout": 60000} if exe_path else {"timeout": 60000}
     if mt5.initialize(**basic_kwargs):
         if mt5.login(login=login_int, password=password, server=server, timeout=60000):
@@ -685,7 +734,6 @@ def unified_get_account_status(acc: dict) -> tuple[bool, float, float, int, str]
         positions = bybit_get_open_positions(acc, "PAXGUSDT") if ok else []
         return ok, bal, eq, len(positions), msg
 
-    # 1. الاتصال المباشر المجاني عبر برنامج MT5 على سيرفر ويندوز (GitHub Actions)
     if NATIVE_MT5_AVAILABLE:
         with mt5_lock:
             ok_nat, msg_nat = native_mt5_connect(acc)
@@ -697,7 +745,6 @@ def unified_get_account_status(acc: dict) -> tuple[bool, float, float, int, str]
             else:
                 return False, 0.0, 0.0, 0, msg_nat
 
-    # 2. خيار احتياطي عبر MetaApi إن وجد
     if MASTER_METAAPI_TOKEN:
         cid = acc.get("cloud_id") or KNOWN_FALLBACK_ACC_ID
         reg = acc.get("region") or "london"
@@ -714,7 +761,6 @@ def unified_get_account_status(acc: dict) -> tuple[bool, float, float, int, str]
     return False, 0.0, 0.0, 0, "شغّل البوت من تبويب Actions في GitHub ليعمل برنامج MT5 الويندوز مجاناً."
 
 def match_mt5_symbol(desired_symbol: str) -> str:
-    """البحث الذكي عن رمز الذهب أو الزوج في منصة الوسيط داخل MT5"""
     candidates = [desired_symbol, "XAUUSD", "XAUUSDm", "XAUUSD.", "GOLD", "GOLDm", "EURUSD", "EURUSDm"]
     for s in candidates:
         si = mt5.symbol_info(s)
@@ -754,7 +800,6 @@ def unified_open_order(acc: dict, action: str, symbol: str, lot: float) -> tuple
             price = tick.ask if action == "BUY" else tick.bid
             order_type = mt5.ORDER_TYPE_BUY if action == "BUY" else mt5.ORDER_TYPE_SELL
 
-            # ضبط حجم اللوت ليتوافق مع الحد الأدنى المسموح في السيرفر
             min_lot = float(getattr(si, "volume_min", 0.01) or 0.01)
             vol = max(float(lot), min_lot)
             lots_to_try = [vol, min_lot] if vol != min_lot else [min_lot]
@@ -945,7 +990,7 @@ def trading_worker(user_id: int, chat_id: int):
                     break
                 time.sleep(5)
         except Exception as e:
-            print(f"Worker error: {e}")
+            safe_print(f"Worker error: {e}")
         time.sleep(3.0)
 
 
@@ -1060,11 +1105,10 @@ def async_diagnostic_all(uid: int, chat_id: int):
 def run_bot_polling():
     tg_api("deleteWebhook", {"drop_pending_updates": True})
     offset = 0
-    print("✅ البوت متعدد الحسابات يعمل الآن بنجاح 100%!")
+    safe_print("Multi-Account MT5 & Gold AI Bot is now running 100%!")
     while True:
-        # إغلاق آمن قبل انتهاء مهلة GitHub Actions ليحفظ قاعدة البيانات تلقائياً
         if time.time() - BOT_START_TIME > MAX_RUNTIME_SECONDS:
-            print("🔄 انتهت دورة التشغيل الحالية، جاري الحفظ الآمن لقاعدة البيانات...")
+            safe_print("Cycle completed, shutting down cleanly to save database state...")
             break
         try:
             res = tg_api("getUpdates", {"offset": offset, "timeout": 10})
@@ -1274,12 +1318,12 @@ def run_bot_polling():
                         edit_msg(chat_id, msg_id, main_dashboard_text(uid), main_dashboard_keyboard(uid))
 
         except Exception as e:
-            print(f"Polling error: {e}")
+            safe_print(f"Polling error: {e}")
             time.sleep(2)
 
 if __name__ == "__main__":
     init_db()
-    # إذا كان يعمل على سيرفر ويندوز GitHub Actions يبدأ بتسجيل الدخول المسبق لحساب MT5 الافتراضي
+    ensure_windows_mt5_terminal()
     if NATIVE_MT5_AVAILABLE:
         threading.Thread(
             target=native_mt5_connect,
