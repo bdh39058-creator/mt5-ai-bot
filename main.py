@@ -15,25 +15,19 @@ import urllib.error
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+# Force UTF-8 globally to completely prevent any encoding crash on Windows
 os.environ["PYTHONIOENCODING"] = "utf-8"
 try:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
+    sys.stderr.reconfigure(encoding="utf-8", errors="ignore")
 except Exception:
     pass
 
 def safe_print(*args):
-    text = " ".join(str(a) for a in args)
     try:
-        print(text, flush=True)
+        print(" ".join(str(a) for a in args), flush=True)
     except Exception:
-        try:
-            sys.stdout.write(text.encode("ascii", errors="ignore").decode("ascii") + "\n")
-            sys.stdout.flush()
-        except Exception:
-            pass
+        pass
 
 NATIVE_MT5_AVAILABLE = False
 if os.name == "nt":
@@ -1015,7 +1009,7 @@ def run_bot_polling():
                     elif data == "menu_add_account":
                         answer_cb(cb_id)
                         pending_input[uid] = "input_new_account"
-                        edit_msg(chat_id, msg_id, "Send account credentials in 3 lines:\nlogin\npassword\nserver", {"inline_keyboard": [[{"text": "Back", "callback_data": "back_home"}]]})
+                        edit_msg(chat_id, msg_id, "Send account credentials in 3 lines:\nlogin\npassword\nserver", {"inline_keyboards": [[{"text": "Back", "callback_data": "back_home"}]]})
 
                     elif data == "menu_manage_accounts":
                         answer_cb(cb_id)
@@ -1072,7 +1066,7 @@ def run_bot_polling():
                         mapping = {
                             "set_lot": ("lot", "Send lot size (e.g. 0.01):"),
                             "set_symbol": ("symbol", "Send symbol (e.g. XAUUSD):"),
-                            "set_tp": ("trade_tp_usd", "SendTP in USD:"),
+                            "set_tp": ("trade_tp_usd", "Send TP in USD:"),
                             "set_sl": ("trade_sl_usd", "Send SL in USD:"),
                         }
                         f_name, txt = mapping[data]
@@ -1088,6 +1082,7 @@ def run_bot_polling():
                     elif data == "toggle_run":
                         answer_cb(cb_id)
                         if active_traders.get(uid, False):
+                            active_traders.get(uid, False)
                             active_traders[uid] = False
                         else:
                             active_traders[uid] = True
