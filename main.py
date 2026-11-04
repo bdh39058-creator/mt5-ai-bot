@@ -1072,7 +1072,7 @@ def run_bot_polling():
                         mapping = {
                             "set_lot": ("lot", "Send lot size (e.g. 0.01):"),
                             "set_symbol": ("symbol", "Send symbol (e.g. XAUUSD):"),
-                            "set_tp": ("trade_tp_usd", "Send TP in USD:"),
+                            "set_tp": ("trade_tp_usd", "SendTP in USD:"),
                             "set_sl": ("trade_sl_usd", "Send SL in USD:"),
                         }
                         f_name, txt = mapping[data]
