@@ -1,0 +1,61 @@
+name: MT5 Multi-Account AI Bot 24/7
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */5 * * *'
+
+concurrency:
+  group: mt5-ai-telegram-bot
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  run-trading-bot:
+    runs-on: windows-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install MetaTrader 5
+        shell: powershell
+        run: |
+          if (!(Test-Path "C:\Program Files\MetaTrader 5\terminal64.exe")) {
+            Invoke-WebRequest -Uri "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe" -OutFile "mt5setup.exe"
+            Start-Process -FilePath ".\mt5setup.exe" -ArgumentList "/auto" -Wait
+            Start-Sleep -Seconds 15
+          }
+          python -m pip install --upgrade pip
+          pip install MetaTrader5
+
+      - name: Run Bot
+        env:
+          PYTHONIOENCODING: utf-8
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          GROQ_TOKEN: ${{ secrets.GROQ_TOKEN }}
+          GEMINI_TOKEN: ${{ secrets.GEMINI_TOKEN }}
+          COHERE_TOKEN: ${{ secrets.COHERE_TOKEN }}
+          GH_MODELS_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
+          OPENROUTER1_TOKEN: ${{ secrets.OPENROUTER1_TOKEN }}
+          HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+          SAMBANOVA_TOKEN: ${{ secrets.SAMBANOVA_TOKEN }}
+        run: |
+          python -X utf8 main.py
+
+      - name: Save DB State
+        if: always()
+        run: |
+          git config --global user.name "MT5-Bot"
+          git config --global user.email "bot@users.noreply.github.com"
+          git add multi_mt5_gold_bot.db || exit 0
+          git diff --staged --quiet || git commit -m "Auto-save DB"
+          git push || exit 0
