@@ -15,7 +15,7 @@ import urllib.error
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# ================= 0. حل جذري نهائي لمشكلة الترميز وتفعيل العربية =================
+# ================= 0. حل جذري لترميز ويندوز ومنع الانهيار =================
 os.environ["PYTHONIOENCODING"] = "utf-8"
 try:
     if hasattr(sys.stdout, "reconfigure"):
@@ -36,6 +36,7 @@ def safe_print(*args):
         except Exception:
             pass
 
+# فحص وتثبيت مكتبة وسيرفر ميتاتريدر 5 الرسمي على ويندوز جيت هاب
 NATIVE_MT5_AVAILABLE = False
 if os.name == "nt":
     try:
@@ -83,13 +84,13 @@ BOT_START_TIME = time.time()
 MAX_RUNTIME_SECONDS = 340 * 60
 
 
-# ================= 1. خادم الويب الشامل لإبقاء البوت شغالاً 24/7 =================
+# ================= 1. خادم الويب لإبقاء البوت نشطاً 24/7 =================
 class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write("Multi-Account AI Arabic Trading Bot is Running 24/7!".encode("utf-8"))
+        self.wfile.write("Arabic MT5 AI Trading Bot is Running 24/7!".encode("utf-8"))
 
     def do_HEAD(self):
         self.send_response(200)
@@ -110,7 +111,7 @@ def start_keep_alive():
             continue
 
 
-# ================= 2. قراءة المفاتيح السرية وبيانات الحساب =================
+# ================= 2. قراءة المفاتيح السرية =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 MASTER_METAAPI_TOKEN = os.getenv("METAAPI_TOKEN", "").strip()
 ENV_BYBIT_KEY = os.getenv("BYBIT_API_KEY", "").strip()
@@ -128,7 +129,6 @@ SAMBANOVA_KEY = os.getenv("SAMBANOVA_TOKEN", "").strip()
 KNOWN_MT5_LOGIN = "5058253637"
 KNOWN_MT5_PASS = "*aGm1cNp"
 KNOWN_MT5_SERVER = "MetaQuotes-Demo"
-KNOWN_FALLBACK_ACC_ID = "2edd990c-e8e3-4853-98e1-867ab23136e0"
 
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
@@ -193,7 +193,7 @@ def delete_msg(chat_id: int, message_id: int):
     return tg_api("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
 
 
-# ================= 4. قاعدة البيانات الشاملة (تعدد الحسابات + 10 أدوات ذكاء اصطناعي) =================
+# ================= 4. قاعدة البيانات وإدارة الحسابات =================
 DB_FILE = "multi_mt5_gold_bot.db"
 
 def init_db():
@@ -227,8 +227,6 @@ def init_db():
             login_or_key TEXT DEFAULT '',
             password_or_secret TEXT DEFAULT '',
             server_or_mode TEXT DEFAULT '',
-            cloud_id TEXT DEFAULT '',
-            region TEXT DEFAULT 'london',
             is_enabled INTEGER DEFAULT 1
         )
     """)
@@ -266,14 +264,14 @@ def ensure_default_account(user_id: int):
     rows = c.fetchall()
     if not rows:
         c.execute("""
-            INSERT INTO trading_accounts (user_id, platform, account_label, login_or_key, password_or_secret, server_or_mode, cloud_id, region, is_enabled)
-            VALUES (?, 'MT5', ?, ?, ?, ?, ?, 'london', 1)
-        """, (user_id, f"MT5 ({KNOWN_MT5_LOGIN})", KNOWN_MT5_LOGIN, KNOWN_MT5_PASS, KNOWN_MT5_SERVER, KNOWN_FALLBACK_ACC_ID))
+            INSERT INTO trading_accounts (user_id, platform, account_label, login_or_key, password_or_secret, server_or_mode, is_enabled)
+            VALUES (?, 'MT5', ?, ?, ?, ?, 1)
+        """, (user_id, f"MT5 ({KNOWN_MT5_LOGIN})", KNOWN_MT5_LOGIN, KNOWN_MT5_PASS, KNOWN_MT5_SERVER))
         new_pk = c.lastrowid
         if ENV_BYBIT_KEY and ENV_BYBIT_SECRET:
             c.execute("""
-                INSERT INTO trading_accounts (user_id, platform, account_label, login_or_key, password_or_secret, server_or_mode, cloud_id, region, is_enabled)
-                VALUES (?, 'BYBIT', ?, ?, ?, 'BYBIT-DEMO', '', 'global', 1)
+                INSERT INTO trading_accounts (user_id, platform, account_label, login_or_key, password_or_secret, server_or_mode, is_enabled)
+                VALUES (?, 'BYBIT', ?, ?, ?, 'BYBIT-DEMO', 1)
             """, (user_id, f"Bybit ({ENV_BYBIT_KEY[:6]})", ENV_BYBIT_KEY, ENV_BYBIT_SECRET))
         c.execute("UPDATE users SET active_account_id = ? WHERE user_id = ?", (new_pk, user_id))
         conn.commit()
@@ -340,7 +338,7 @@ def get_target_trading_accounts(user_id: int) -> list:
     active = get_active_account(user_id)
     return [active] if active else all_accs
 
-def add_or_update_trading_account(user_id: int, platform: str, login_key: str, pass_secret: str, server_mode: str, cloud_id: str = "", region: str = "london") -> int:
+def add_or_update_trading_account(user_id: int, platform: str, login_key: str, pass_secret: str, server_mode: str) -> int:
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
@@ -351,14 +349,14 @@ def add_or_update_trading_account(user_id: int, platform: str, login_key: str, p
         pk = existing["acc_pk"]
         c.execute("""
             UPDATE trading_accounts
-            SET platform = ?, account_label = ?, password_or_secret = ?, server_or_mode = ?, cloud_id = ?, region = ?, is_enabled = 1
+            SET platform = ?, account_label = ?, password_or_secret = ?, server_or_mode = ?, is_enabled = 1
             WHERE acc_pk = ?
-        """, (platform, label, pass_secret, server_mode, cloud_id or existing["cloud_id"], region or existing["region"], pk))
+        """, (platform, label, pass_secret, server_mode, pk))
     else:
         c.execute("""
-            INSERT INTO trading_accounts (user_id, platform, account_label, login_or_key, password_or_secret, server_or_mode, cloud_id, region, is_enabled)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-        """, (user_id, platform, label, login_key, pass_secret, server_mode, cloud_id, region))
+            INSERT INTO trading_accounts (user_id, platform, account_label, login_or_key, password_or_secret, server_or_mode, is_enabled)
+            VALUES (?, ?, ?, ?, ?, ?, 1)
+        """, (user_id, platform, label, login_key, pass_secret, server_mode))
         pk = c.lastrowid
     c.execute("UPDATE users SET active_account_id = ? WHERE user_id = ?", (pk, user_id))
     conn.commit()
@@ -546,119 +544,12 @@ def analyze_market_with_ai(user_id: int, symbol: str) -> dict:
     }
 
 
-# ================= 6. المحرك الأول: منصة Bybit للذهب =================
-def bybit_base_url(server_mode: str) -> str:
-    return "https://api-demo.bybit.com" if "DEMO" in str(server_mode).upper() else "https://api.bybit.com"
-
-def bybit_signed_request(acc: dict, endpoint: str, method: str = "GET", params: dict = None) -> tuple[bool, dict, str]:
-    api_key = acc.get("login_or_key", "").strip()
-    api_secret = acc.get("password_or_secret", "").strip()
-    base = bybit_base_url(acc.get("server_or_mode", "BYBIT-DEMO"))
-    if not api_key or not api_secret:
-        return False, {}, "Bybit API incomplete."
-
-    ts = str(int(time.time() * 1000))
-    recv_win = "10000"
-    params = params or {}
-
-    if method == "GET":
-        query_str = urllib.parse.urlencode(sorted(params.items()))
-        full_url = f"{base}{endpoint}?{query_str}" if query_str else f"{base}{endpoint}"
-        body_to_send = None
-    else:
-        full_url = f"{base}{endpoint}"
-        body_to_send = json.dumps(params)
-
-    param_str = f"{ts}{api_key}{recv_win}{body_to_send if body_to_send else query_str}"
-    signature = hmac.new(api_secret.encode("utf-8"), param_str.encode("utf-8"), hashlib.sha256).hexdigest()
-
-    headers = {
-        "X-BAPI-API-KEY": api_key,
-        "X-BAPI-SIGN": signature,
-        "X-BAPI-SIGN-TYPE": "2",
-        "X-BAPI-TIMESTAMP": ts,
-        "X-BAPI-RECV-WINDOW": recv_win,
-        "Content-Type": "application/json"
-    }
-    st, res = http_request(full_url, method=method, headers=headers, raw_body=body_to_send, timeout=12)
-    if st == 200 and isinstance(res, dict):
-        if res.get("retCode") == 0:
-            return True, res.get("result", {}), "OK"
-        return False, res, f"Bybit: {res.get('retMsg', 'Error')}"
-    return False, {}, f"HTTP {st}"
-
-def map_gold_symbol_for_bybit(sym: str) -> str:
-    s = sym.upper().strip()
-    if s in ["XAUUSD", "GOLD", "XAUUSDT", "PAXG", "PAXGUSDT"]:
-        return "PAXGUSDT"
-    if not s.endswith("USDT"):
-        return f"{s}USDT"
-    return s
-
-def bybit_get_balance(acc: dict) -> tuple[bool, float, float, str]:
-    ok, res, err = bybit_signed_request(acc, "/v5/account/wallet-balance", "GET", {"accountType": "UNIFIED"})
-    if ok:
-        lst = res.get("list", [])
-        if lst:
-            eq = float(lst[0].get("totalEquity", 0.0))
-            bal = float(lst[0].get("totalWalletBalance", eq))
-            return True, bal, eq, "Connected"
-    return False, 0.0, 0.0, err
-
-def bybit_get_open_positions(acc: dict, symbol: str) -> list:
-    bybit_sym = map_gold_symbol_for_bybit(symbol)
-    ok, res, _ = bybit_signed_request(acc, "/v5/position/list", "GET", {"category": "linear", "symbol": bybit_sym})
-    if not ok:
-        return []
-    out = []
-    for p in res.get("list", []):
-        sz = float(p.get("size", 0.0))
-        if sz > 0:
-            out.append({
-                "id": f"{p.get('symbol')}_{p.get('side')}",
-                "symbol": p.get("symbol"),
-                "side": p.get("side"),
-                "size": sz,
-                "profit": float(p.get("unrealisedPnl", 0.0))
-            })
-    return out
-
-def bybit_close_position(acc: dict, pos: dict) -> bool:
-    close_side = "Sell" if pos.get("side") == "Buy" else "Buy"
-    params = {
-        "category": "linear",
-        "symbol": pos.get("symbol"),
-        "side": close_side,
-        "orderType": "Market",
-        "qty": str(pos.get("size")),
-        "reduceOnly": True
-    }
-    ok, _, _ = bybit_signed_request(acc, "/v5/order/create", "POST", params)
-    return ok
-
-def bybit_open_order(acc: dict, action: str, symbol: str, lot: float) -> tuple[bool, str, str, float]:
-    bybit_sym = map_gold_symbol_for_bybit(symbol)
-    qty = max(round(float(lot), 2), 0.01)
-    params = {
-        "category": "linear",
-        "symbol": bybit_sym,
-        "side": "Buy" if action == "BUY" else "Sell",
-        "orderType": "Market",
-        "qty": str(qty)
-    }
-    ok, res, err = bybit_signed_request(acc, "/v5/order/create", "POST", params)
-    if ok:
-        oid = str(res.get("orderId", "Executed"))
-        return True, bybit_sym, oid, qty
-    return False, bybit_sym, err, qty
-
-
-# ================= 7. المحرك الثاني: منصة MT5 المباشرة (مع التحقق الصارم من التذاكر) =================
+# ================= 6. تنفيذ صفقات MT5 الحقيقية مع التحقق الصارم =================
 mt5_lock = threading.Lock()
 
 def native_mt5_connect(acc: dict) -> tuple[bool, str]:
     if not NATIVE_MT5_AVAILABLE:
-        return False, "MetaTrader5 library requires Windows GitHub Actions."
+        return False, "مكتبة MetaTrader5 تتطلب بيئة ويندوز في GitHub Actions."
     exe_path = find_mt5_terminal_exe()
     if not exe_path:
         ensure_windows_mt5_terminal()
@@ -666,7 +557,7 @@ def native_mt5_connect(acc: dict) -> tuple[bool, str]:
 
     login_str = str(acc.get("login_or_key", "")).strip()
     if not login_str.isdigit():
-        return False, f"Invalid login: {login_str}"
+        return False, f"رقم حساب غير صالح: {login_str}"
     login_int = int(login_str)
     password = str(acc.get("password_or_secret", "")).strip()
     server = str(acc.get("server_or_mode", "")).strip()
@@ -682,16 +573,10 @@ def native_mt5_connect(acc: dict) -> tuple[bool, str]:
     if mt5.initialize(**basic_kwargs):
         if mt5.login(login=login_int, password=password, server=server, timeout=60000):
             return True, "CONNECTED"
-        return False, f"Login failed: {mt5.last_error()}"
-    return False, f"Init failed: {mt5.last_error()}"
+        return False, f"فشل تسجيل الدخول: {mt5.last_error()}"
+    return False, f"فشل تهيئة برنامج MT5: {mt5.last_error()}"
 
 def unified_get_account_status(acc: dict) -> tuple[bool, float, float, int, str]:
-    platform = acc.get("platform", "MT5").upper()
-    if platform == "BYBIT":
-        ok, bal, eq, msg = bybit_get_balance(acc)
-        positions = bybit_get_open_positions(acc, "PAXGUSDT") if ok else []
-        return ok, bal, eq, len(positions), msg
-
     if NATIVE_MT5_AVAILABLE:
         with mt5_lock:
             ok_nat, msg_nat = native_mt5_connect(acc)
@@ -699,10 +584,10 @@ def unified_get_account_status(acc: dict) -> tuple[bool, float, float, int, str]
                 info = mt5.account_info()
                 pos = mt5.positions_get()
                 if info:
-                    return True, float(info.balance), float(info.equity), (len(pos) if pos else 0), "Connected"
+                    return True, float(info.balance), float(info.equity), (len(pos) if pos else 0), "متصل بنجاح"
             else:
                 return False, 0.0, 0.0, 0, msg_nat
-    return False, 0.0, 0.0, 0, "Run bot on GitHub Actions Windows."
+    return False, 0.0, 0.0, 0, "غير متصل بالمنصة"
 
 def match_mt5_symbol(desired_symbol: str) -> str:
     candidates = [desired_symbol, "XAUUSD", "XAUUSDm", "XAUUSD.", "GOLD", "GOLDm", "EURUSD"]
@@ -715,22 +600,21 @@ def match_mt5_symbol(desired_symbol: str) -> str:
     return desired_symbol
 
 def unified_open_order(acc: dict, action: str, symbol: str, lot: float) -> tuple[bool, str, str, float]:
-    platform = acc.get("platform", "MT5").upper()
-    if platform == "BYBIT":
-        return bybit_open_order(acc, action, symbol, lot)
-
     if NATIVE_MT5_AVAILABLE:
         with mt5_lock:
             ok_nat, err_nat = native_mt5_connect(acc)
             if not ok_nat:
                 return False, symbol, err_nat, lot
+
             selected_sym = match_mt5_symbol(symbol)
             si = mt5.symbol_info(selected_sym)
             if si is None:
-                return False, symbol, f"Symbol {symbol} not found.", lot
+                return False, symbol, f"الرمز {symbol} غير متوفر في المنصة.", lot
+
             tick = mt5.symbol_info_tick(selected_sym)
             if not tick:
-                return False, selected_sym, "No tick data.", lot
+                return False, selected_sym, "تعذر جلب سعر السوق الحي.", lot
+
             price = tick.ask if action == "BUY" else tick.bid
             order_type = mt5.ORDER_TYPE_BUY if action == "BUY" else mt5.ORDER_TYPE_SELL
             vol = max(float(lot), float(getattr(si, "volume_min", 0.01) or 0.01))
@@ -744,20 +628,19 @@ def unified_open_order(acc: dict, action: str, symbol: str, lot: float) -> tuple
                     "price": price,
                     "deviation": 30,
                     "magic": 990011,
-                    "comment": "AI_Bot",
+                    "comment": "AI_Real_Bot",
                     "type_time": mt5.ORDER_TIME_GTC,
                     "type_filling": fill_mode,
                 }
                 res = mt5.order_send(req)
                 if res and res.retcode in [mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL]:
                     return True, selected_sym, str(res.order), vol
-            return False, selected_sym, f"Order rejected: {mt5.last_error()}", vol
-    return False, symbol, "MT5 not connected.", lot
+                elif res:
+                    return False, selected_sym, f"رفض الوسيط: {res.comment} (كود {res.retcode})", vol
+            return False, selected_sym, f"خطأ تنفيذ: {mt5.last_error()}", vol
+    return False, symbol, "غير متصل ببرنامج MT5 محلياً.", lot
 
 def unified_get_positions(acc: dict, symbol: str) -> list:
-    platform = acc.get("platform", "MT5").upper()
-    if platform == "BYBIT":
-        return bybit_get_open_positions(acc, symbol)
     if NATIVE_MT5_AVAILABLE:
         with mt5_lock:
             if native_mt5_connect(acc)[0]:
@@ -767,9 +650,6 @@ def unified_get_positions(acc: dict, symbol: str) -> list:
     return []
 
 def unified_close_position(acc: dict, pos: dict) -> bool:
-    platform = acc.get("platform", "MT5").upper()
-    if platform == "BYBIT":
-        return bybit_close_position(acc, pos)
     if NATIVE_MT5_AVAILABLE and "ticket" in pos:
         with mt5_lock:
             if native_mt5_connect(acc)[0]:
@@ -798,7 +678,7 @@ def unified_close_position(acc: dict, pos: dict) -> bool:
     return False
 
 
-# ================= 8. محرك التداول الآلي والتحكم بتيليجرام (باللغة العربية الكاملة) =================
+# ================= 7. واجهة التحكم باللغة العربية بالكامل =================
 authorized_users = set()
 active_traders = {}
 pending_input = {}
@@ -821,31 +701,31 @@ def execute_ai_trade_across_accounts(user_id: int, chat_id: int, notify_start: b
         return False
 
     if notify_start:
-        send_msg(chat_id, f"⚡ جاري تحليل السوق وإرسال الأمر الحقيقي إلى ({len(target_accounts)}) حساب...")
+        send_msg(chat_id, f"⚡ جاري تحليل السوق وإرسال أمر التداول الحقيقي إلى ({len(target_accounts)}) حساب...")
 
     decision = analyze_market_with_ai(user_id, u["symbol"])
     action = decision["action"]
     any_success = False
     report = [
-        f"🤖 **قرار الذكاء الاصطناعي:** {action} (نسبة الثقة: {decision['confidence']}%)",
-        f"• الأداة النشطة: {decision['provider_name']}",
-        f"• المؤشرات الفنية: {decision['indicators']}\n"
+        f"🤖 **قرار الذكاء الاصطناعي:** {action} (الثقة: {decision['confidence']}%)",
+        f"• الأداة: {decision['provider_name']}",
+        f"• مؤشرات السوق: {decision['indicators']}\n"
     ]
 
     for acc in target_accounts:
         ok, exec_sym, order_or_err, used_lot = unified_open_order(acc, action, u["symbol"], u["lot"])
         if ok:
             any_success = True
-            report.append(f"✅ الحساب [{acc['account_label']}]: تم تنفيذ صفقة {action} على {exec_sym} (لوت {used_lot}) | تذكرة رقم #{order_or_err}")
+            report.append(f"✅ الحساب [{acc['account_label']}]: تم فتح صفقة {action} على {exec_sym} (لوت {used_lot}) | تذكرة رقم #{order_or_err}")
         else:
-            report.append(f"⚠️ الحساب [{acc['account_label']}]: تعذر التنفيذ ({order_or_err})")
+            report.append(f"⚠️ الحساب [{acc['account_label']}]: فشل التنفيذ ({order_or_err})")
 
     send_msg(chat_id, "\n".join(report))
     return any_success
 
 def trading_worker(user_id: int, chat_id: int):
     u = get_user(user_id)
-    send_msg(chat_id, "🟢 **بدأ التداول الآلي بالذكاء الاصطناعي بنجاح!**")
+    send_msg(chat_id, "🟢 **بدأ نظام التداول الآلي الحقيقي بالذكاء الاصطناعي!**")
     first_cycle = True
     while active_traders.get(user_id, False):
         try:
@@ -856,7 +736,7 @@ def trading_worker(user_id: int, chat_id: int):
                 break
             if u["current_daily_pnl"] <= -abs(u["daily_max_loss"]):
                 active_traders[user_id] = False
-                send_msg(chat_id, "🛡️ وصلت الخسارة للحد الأقصى. توقف البوت لحماية رأس مالك.")
+                send_msg(chat_id, "🛡️ وصلت الخسارة للحد الأقصى اليومي. توقف البوت لحماية رأس مالك.")
                 break
 
             target_accounts = get_target_trading_accounts(user_id)
@@ -880,7 +760,7 @@ def trading_worker(user_id: int, chat_id: int):
                 first_cycle = False
                 if not ok_exec:
                     active_traders[user_id] = False
-                    send_msg(chat_id, "⚠️ تم إيقاف التداول مؤقتاً بسبب خطأ في تنفيذ الأوامر بالسيرفر.")
+                    send_msg(chat_id, "⚠️ تم إيقاف التداول مؤقتاً بسبب رفض الوسيط للأمر.")
                     break
                 time.sleep(5)
         except Exception as e:
@@ -896,7 +776,7 @@ def main_dashboard_keyboard(user_id: int) -> dict:
     return {"inline_keyboard": [
         [{"text": "➕ إضافة حساب تداول جديد", "callback_data": "menu_add_account"}],
         [{"text": f"📂 إدارة الحسابات ({len(all_accs)}) | النشط: {active_acc.get('account_label')}", "callback_data": "menu_manage_accounts"}],
-        [{"text": f"🤖 أداة الذكاء الاصطناعي: {tool.get('name')}", "callback_data": "menu_ai_select"}],
+        [{"text": f"🤖 الذكاء الاصطناعي: {tool.get('name')}", "callback_data": "menu_ai_select"}],
         [{"text": "🔍 فحص الرصيد الحي وحالة الحسابات", "callback_data": "diag_all"}],
         [
             {"text": f"💵 اللوت: {u['lot']}", "callback_data": "set_lot"},
@@ -953,7 +833,7 @@ def ai_selection_keyboard(user_id: int) -> dict:
     return {"inline_keyboard": rows}
 
 def async_diagnostic_all(uid: int, chat_id: int):
-    sent = send_msg(chat_id, "⏳ جاري فحص الرصيد الحي والاتصال لجميع الحسابات...")
+    sent = send_msg(chat_id, "⏳ جاري فحص الرصيد الحي والاتصال الفعلي بمنصة MT5...")
     msg_id = sent.get("result", {}).get("message_id") if isinstance(sent, dict) else None
     accs = get_user_accounts(uid)
     lines = ["🔍 **تقرير التشخيص الفعلي:**\n"]
@@ -1003,10 +883,9 @@ def run_bot_polling():
                                 pk = add_or_update_trading_account(uid, platform, p1, p2, p3)
                                 pending_input.pop(uid, None)
                                 acc_obj = get_account_by_pk(pk)
-                                ok_st, bal, eq, _, st_msg = unified_get_account_status(acc_obj)
                                 send_msg(chat_id, f"✅ تم حفظ وتفعيل الحساب بنجاح! ({acc_obj['account_label']})", main_dashboard_keyboard(uid))
                             else:
-                                send_msg(chat_id, "⚠️ أرسل بيانات الحساب في 3 أسطر:\nاسم المستخدم\nكلمة المرور\nالسيرفر")
+                                send_msg(chat_id, "⚠️ أرسل بيانات حسابك في 3 أسطر:\nاسم المستخدم\nكلمة المرور\nالسيرفر")
 
                         elif action.startswith("field_"):
                             field = action.replace("field_", "")
@@ -1071,7 +950,7 @@ def run_bot_polling():
                         edit_msg(chat_id, msg_id, main_dashboard_text(uid), main_dashboard_keyboard(uid))
 
                     elif data == "instant_trade":
-                        answer_cb(cb_id, "جاري تنفيذ الصفقة...")
+                        answer_cb(cb_id, "جاري تنفيذ الصفقة الحقيقية...")
                         if not active_traders.get(uid, False):
                             active_traders[uid] = True
                             edit_msg(chat_id, msg_id, main_dashboard_text(uid), main_dashboard_keyboard(uid))
@@ -1085,7 +964,7 @@ def run_bot_polling():
                         u = get_user(uid)
                         for acc in get_user_accounts(uid):
                             for p in unified_get_positions(acc, u["symbol"]):
-                                unified_close_position(acc, pos=p)
+                                unified_close_position(acc, p)
                         send_msg(chat_id, "🚨 تم إغلاق جميع الصفقات المفتوحة.", main_dashboard_keyboard(uid))
 
                     elif data in ["set_lot", "set_symbol", "set_tp", "set_sl"]:
