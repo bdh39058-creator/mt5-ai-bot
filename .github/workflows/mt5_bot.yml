@@ -26,7 +26,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 3. Set UTF-8 Encoding for Windows Environment
+      - name: 3. Force UTF-8 Encoding in Windows Shell
         shell: cmd
         run: |
           chcp 65001
