@@ -68,7 +68,10 @@ def ensure_windows_mt5_terminal():
     safe_print("Installing Official MetaTrader 5 Terminal...")
     installer_path = os.path.join(os.getcwd(), "mt5setup.exe")
     try:
-        urllib.request.urlretrieve("https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe", installer_path)
+        urllib.request.urlretrieve(
+            "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe",
+            installer_path
+        )
         subprocess.run([installer_path, "/auto"], timeout=120, check=False)
         for _ in range(20):
             if find_mt5_terminal_exe():
@@ -82,12 +85,11 @@ BOT_START_TIME = time.time()
 MAX_RUNTIME_SECONDS = 335 * 60
 
 
-# ================= 1. تفعيل التداول الآلي في MT5 لمنع كود 10027 =================
+# ================= 1. تفعيل التداول الآلي في MT5 =================
 def force_enable_mt5_autotrading(login_int: int, password: str, server: str):
     try:
         if mt5.terminal_info() and getattr(mt5.terminal_info(), "trade_allowed", False):
             return True
-        # محاولة إعادة تهيئة مع إعدادات التداول المسموح
         exe_path = find_mt5_terminal_exe()
         if exe_path:
             mt5.initialize(exe_path, login=login_int, password=password, server=server, timeout=30000)
@@ -352,7 +354,7 @@ def get_target_trading_accounts(user_id: int) -> list:
     u = get_user(user_id)
     all_accs = get_user_accounts(user_id)
     if u.get("trade_all_accounts") == 1:
-        enabled = [a for a in all_accs if a.get("is_enabled"] == 1]
+        enabled = [a for a in all_accs if a.get("is_enabled") == 1]
         return enabled if enabled else all_accs
     active = get_active_account(user_id)
     return [active] if active else all_accs
@@ -847,22 +849,22 @@ def accounts_management_keyboard(user_id: int) -> dict:
     rows = []
     for a in accs:
         pk = a["acc_pk"]
-        is_act = "🟢 [النشط] " if pk == u["active_account_id"] else ""
+        is_act = "[ACTIVE] " if pk == u["active_account_id"] else ""
         rows.append([
             {"text": f"{is_act}{a['account_label']} [{a['server_or_mode']}]", "callback_data": f"select_acc_{pk}"},
-            {"text": "🗑️ حذف", "callback_data": f"del_acc_{pk}"}
+            {"text": "Delete", "callback_data": f"del_acc_{pk}"}
         ])
-    rows.append([{"text": "➕ إضافة حساب", "callback_data": "menu_add_account"}])
-    rows.append([{"text": "🔙 رجوع", "callback_data": "back_home"}])
+    rows.append([{"text": "Add Account", "callback_data": "menu_add_account"}])
+    rows.append([{"text": "Back", "callback_data": "back_home"}])
     return {"inline_keyboard": rows}
 
 def ai_selection_keyboard(user_id: int) -> dict:
     u = get_user(user_id)
     rows = []
     for t in get_ai_tools():
-        mark = "✅ " if t["id"] == u["selected_ai_id"] else ""
+        mark = "[SELECTED] " if t["id"] == u["selected_ai_id"] else ""
         rows.append([{"text": f"{mark}{t['name']}", "callback_data": f"pick_ai_{t['id']}"}])
-    rows.append([{"text": "🔙 رجوع", "callback_data": "back_home"}])
+    rows.append([{"text": "Back", "callback_data": "back_home"}])
     return {"inline_keyboard": rows}
 
 def async_diagnostic_all(uid: int, chat_id: int):
