@@ -15,7 +15,6 @@ import urllib.error
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# حل جذري ومطلق لمشكلة الترميز في ويندوز
 os.environ["PYTHONIOENCODING"] = "utf-8"
 try:
     if hasattr(sys.stdout, "reconfigure"):
@@ -64,23 +63,20 @@ def ensure_windows_mt5_terminal():
     if os.name != "nt":
         return
     if find_mt5_terminal_exe():
-        safe_print("MT5 Terminal is already installed.")
+        safe_print("MT5 Terminal is ready.")
         return
-    safe_print("Downloading and installing Official MetaTrader 5 Terminal...")
+    safe_print("Installing Official MetaTrader 5 Terminal...")
     installer_path = os.path.join(os.getcwd(), "mt5setup.exe")
     try:
-        urllib.request.urlretrieve(
-            "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe",
-            installer_path
-        )
+        urllib.request.urlretrieve("https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe", installer_path)
         subprocess.run([installer_path, "/auto"], timeout=120, check=False)
         for _ in range(20):
             if find_mt5_terminal_exe():
-                safe_print("MT5 Terminal installed successfully!")
+                safe_print("MT5 Terminal installed.")
                 return
             time.sleep(2)
     except Exception as e:
-        safe_print(f"MT5 Auto-install notice: {e}")
+        safe_print(f"MT5 install note: {e}")
 
 BOT_START_TIME = time.time()
 MAX_RUNTIME_SECONDS = 340 * 60
@@ -125,8 +121,7 @@ KNOWN_MT5_LOGIN = "5058253637"
 KNOWN_MT5_PASS = "*aGm1cNp"
 KNOWN_MT5_SERVER = "MetaQuotes-Demo"
 KNOWN_FALLBACK_ACC_ID = "2edd990c-e8e3-4853-98e1-867ab23136e0"
-
-BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
 def http_request(url: str, method: str = "GET", headers: dict = None, payload: dict = None, raw_body: str = None, timeout: int = 20):
     req_headers = {"User-Agent": BROWSER_UA, "Accept": "application/json"}
@@ -327,7 +322,7 @@ def get_target_trading_accounts(user_id: int) -> list:
     u = get_user(user_id)
     all_accs = get_user_accounts(user_id)
     if u.get("trade_all_accounts") == 1:
-        enabled = [a for a in all_accs if a.get("is_enabled") == 1]
+        enabled = [a for a in all_accs if a.get("is_enabled"] == 1]
         return enabled if enabled else all_accs
     active = get_active_account(user_id)
     return [active] if active else all_accs
@@ -445,7 +440,7 @@ def fetch_live_market_indicators(symbol: str) -> tuple[float, str, str]:
                 ema21 = calc_ema(closes, 21)
                 rsi = calc_rsi(closes, 14)
                 bias = "BUY" if (ema9 >= ema21 and rsi < 70) or rsi < 32 else "SELL"
-                return last_p, f"MT5_Live:{last_p:.2f}, RSI14:{rsi:.1f}, EMA9:{ema9:.2f}, EMA21:{ema21:.2f}", bias
+                return last_p, f"MT5_Live:{last_p:.2f}, RSI14:{rsi:.1f}", bias
         except Exception:
             pass
 
@@ -461,7 +456,7 @@ def fetch_live_market_indicators(symbol: str) -> tuple[float, str, str]:
             ema21 = calc_ema(closes, 21)
             rsi = calc_rsi(closes, 14)
             bias = "BUY" if (ema9 >= ema21 and rsi < 70) or rsi < 32 else "SELL"
-            return last_p, f"Price:{last_p:.2f}, RSI14:{rsi:.1f}, EMA9:{ema9:.2f}, EMA21:{ema21:.2f}", bias
+            return last_p, f"Price:{last_p:.2f}, RSI14:{rsi:.1f}", bias
 
     bias = "BUY" if int(time.time()) % 2 == 0 else "SELL"
     return 0.0, f"Symbol:{symbol}, Trend:{bias}", bias
@@ -685,7 +680,7 @@ def unified_get_account_status(acc: dict) -> tuple[bool, float, float, int, str]
                 info = mt5.account_info()
                 pos = mt5.positions_get()
                 if info:
-                    return True, float(info.balance), float(info.equity), (len(pos) if pos else 0), "Connected via Windows MT5"
+                    return True, float(info.balance), float(info.equity), (len(pos) if pos else 0), "Connected"
             else:
                 return False, 0.0, 0.0, 0, msg_nat
     return False, 0.0, 0.0, 0, "Run bot on GitHub Actions Windows."
@@ -923,7 +918,7 @@ def accounts_management_keyboard(user_id: int) -> dict:
             {"text": f"{is_act}{a['account_label']} [{a['server_or_mode']}]", "callback_data": f"select_acc_{pk}"},
             {"text": "Delete", "callback_data": f"del_acc_{pk}"}
         ])
-    rows.append([{"text": "Add Account", "callback_data": "menu_add_account"}],)
+    rows.append([{"text": "Add Account", "callback_data": "menu_add_account"}])
     rows.append([{"text": "Back", "callback_data": "back_home"}])
     return {"inline_keyboard": rows}
 
@@ -933,7 +928,7 @@ def ai_selection_keyboard(user_id: int) -> dict:
     for t in get_ai_tools():
         mark = "[SELECTED] " if t["id"] == u["selected_ai_id"] else ""
         rows.append([{"text": f"{mark}{t['name']}", "callback_data": f"pick_ai_{t['id']}"}])
-    rows.append([{"text": "Back", "callback_data": "back_home"}],)
+    rows.append([{"text": "Back", "callback_data": "back_home"}])
     return {"inline_keyboard": rows}
 
 def async_diagnostic_all(uid: int, chat_id: int):
