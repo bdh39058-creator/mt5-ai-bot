@@ -47,7 +47,7 @@ jobs:
           GROQ_TOKEN: ${{ secrets.GROQ_TOKEN }}
           GEMINI_TOKEN: ${{ secrets.GEMINI_TOKEN }}
           COHERE_TOKEN: ${{ secrets.COHERE_TOKEN }}
-          GH_MODELS_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
           OPENROUTER1_TOKEN: ${{ secrets.OPENROUTER1_TOKEN }}
           HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
           SAMBANOVA_TOKEN: ${{ secrets.SAMBANOVA_TOKEN }}
