@@ -1,11 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-بوت التداول الذكي الشامل (MT5 + Bybit Gold) - النسخة النهائية المحصّنة 24/7
-- إصلاح خطأ proxy_had_hello وفحص الصياغة البرمجية بالكامل
-- حل جذري لكود MT5 10027 + حل كود 10016 (ECN SL/TP) + بدائل الأسعار الحية
-- حل حجب Bybit HTTP 403 عبر الجسر السحابي + دعم One-Way & Hedge Mode
-- استمرارية التداول الآلي 24/7 دون توقف عند الأخطاء المؤقتة أو تعطل حساب فرعي
-"""
 import os
 import sys
 import re
@@ -308,6 +301,7 @@ def db_exec(sql, params=(), one=False):
         conn = sqlite3.connect(DB_FILE, timeout=30)
         conn.row_factory = sqlite3.Row
         try:
+            conn.execute("PRAGMA busy_timeout=30000")
             cur = conn.execute(sql, params)
             if sql.lstrip().upper().startswith("SELECT"):
                 rows = [dict(r) for r in cur.fetchall()]
@@ -329,6 +323,8 @@ def init_db():
     with db_lock:
         conn = sqlite3.connect(DB_FILE, timeout=30)
         try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
             conn.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)")
             _ensure_columns(conn, "users", USER_COLUMNS)
             conn.execute("""CREATE TABLE IF NOT EXISTS trading_accounts (
@@ -1219,7 +1215,6 @@ def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
                     "magic": MAGIC, "comment": "AI_Bot", "type_time": mt5.ORDER_TIME_GTC, "type_filling": mode
                 }
                 res = mt5.order_send(req)
-                # إذا رفض السيرفر بسبب SL/TP في أوامر السوق (كود 10016 أو 10015 أو 10013)، ننفذ بدون SL/TP ثم نضيفهما
                 if res is not None and res.retcode in (10016, 10015, 10013):
                     req["sl"] = 0.0
                     req["tp"] = 0.0
@@ -1258,12 +1253,13 @@ def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
         return _fail(sym, last or "رفض الوسيط")
 
 
-# ======================= 10. Bybit V5 (إصلاح شامل للجسر السحابي وأنماط العقود) =======================
+# ======================= 10. Bybit V5 (إصلاح شامل للجسر السحابي ومزامنة الوقت) =======================
 BYBIT_HOST_LIST = {
     "BYBIT-LIVE": ["https://api.bytick.com", "https://api.bybit.com"],
     "BYBIT-DEMO": ["https://api-demo.bybit.com"],
     "BYBIT-TESTNET": ["https://api-testnet.bybit.com"],
 }
+bybit_time_offset_ms = 0
 
 
 def get_user_bybit_proxy(uid):
@@ -1299,47 +1295,76 @@ def bybit_err(res):
     return f"{res.get('retMsg') or res.get('error') or 'خطأ غير معروف'} (كود {res.get('retCode', res.get('_status', '?'))})"
 
 
+def sync_bybit_time(proxy, host):
+    global bybit_time_offset_ms
+    try:
+        url = (proxy + "/v5/market/time") if proxy else (host + "/v5/market/time")
+        headers = {"X-Target-Host": host} if proxy else None
+        st, res = http_request(url, "GET", headers=headers, timeout=6, verify_ssl=False)
+        if st == 200 and isinstance(res, dict):
+            srv_sec = (res.get("result") or {}).get("timeSecond")
+            if srv_sec:
+                bybit_time_offset_ms = int(srv_sec) * 1000 - int(time.time() * 1000)
+    except Exception:
+        pass
+
+
 def bybit_request(acc, method, path, params=None, body=None):
     mode = acc.get("server_or_mode", "BYBIT-DEMO").upper()
     hosts = list(BYBIT_HOST_LIST.get(mode, BYBIT_HOST_LIST["BYBIT-DEMO"]))
     proxy = get_user_bybit_proxy(acc.get("user_id"))
     key, secret = acc["login_or_key"], acc["password_or_secret"]
-    ts, recv = str(int(time.time() * 1000)), "10000"
+    recv = "20000"
 
-    if method == "GET":
-        qs = urllib.parse.urlencode(params or {})
-        sig = bybit_sign(secret, ts, key, recv, qs)
-        full_path = path + ("?" + qs if qs else "")
-        raw = None
-    else:
-        raw = json.dumps(body or {}, separators=(",", ":"))
-        sig = bybit_sign(secret, ts, key, recv, raw)
-        full_path = path
-
-    base_headers = {"X-BAPI-API-KEY": key, "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": recv, "X-BAPI-SIGN": sig}
-    last_res = {"_status": 500, "error": "No host"}
-    proxy_had_hello = False
-
-    if proxy:
-        h = dict(base_headers)
-        h["X-Target-Host"] = hosts[0]
-        status, res = http_request(proxy + full_path, method, headers=h, raw_body=raw, timeout=12, verify_ssl=False)
-        res["_status"] = status
-        if "Hello World" in str(res.get("_raw_text", "")):
-            proxy_had_hello = True
-        elif status == 200 and "retCode" in res:
-            return res.get("retCode") == 0, res
+    for attempt in range(2):
+        ts = str(int(time.time() * 1000) + bybit_time_offset_ms)
+        if method == "GET":
+            qs = urllib.parse.urlencode(params or {})
+            sig = bybit_sign(secret, ts, key, recv, qs)
+            full_path = path + ("?" + qs if qs else "")
+            raw = None
         else:
-            last_res = res
+            raw = json.dumps(body or {}, separators=(",", ":"))
+            sig = bybit_sign(secret, ts, key, recv, raw)
+            full_path = path
 
-    for host in hosts:
-        status, res = http_request(host + full_path, method, headers=base_headers, raw_body=raw, timeout=12, verify_ssl=False)
-        res["_status"] = status
-        if proxy_had_hello and status == 403:
-            res["_proxy_hello_world"] = True
-        last_res = res
-        if status != 403:
-            break
+        base_headers = {
+            "X-BAPI-API-KEY": key,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": recv,
+            "X-BAPI-SIGN": sig
+        }
+        last_res = {"_status": 500, "error": "No host"}
+        proxy_had_hello = False
+
+        if proxy:
+            h = dict(base_headers)
+            h["X-Target-Host"] = hosts[0]
+            status, res = http_request(proxy + full_path, method, headers=h, raw_body=raw, timeout=12, verify_ssl=False)
+            res["_status"] = status
+            if "Hello World" in str(res.get("_raw_text", "")):
+                proxy_had_hello = True
+            elif status == 200 and "retCode" in res:
+                if res.get("retCode") == 10002 and attempt == 0:
+                    sync_bybit_time(proxy, hosts[0])
+                    continue
+                return res.get("retCode") == 0, res
+            else:
+                last_res = res
+
+        for host in hosts:
+            status, res = http_request(host + full_path, method, headers=base_headers, raw_body=raw, timeout=12, verify_ssl=False)
+            res["_status"] = status
+            if proxy_had_hello and status == 403:
+                res["_proxy_hello_world"] = True
+            last_res = res
+            if status != 403:
+                break
+
+        if last_res.get("retCode") == 10002 and attempt == 0:
+            sync_bybit_time(proxy, hosts[0])
+            continue
+        break
 
     return last_res.get("retCode") == 0, last_res
 
@@ -1422,7 +1447,6 @@ def bybit_open(acc, action, symbol, lot, tp_usd, sl_usd):
     buy = action == "BUY"
     last_err = ""
     for sym in bybit_symbol_candidates(symbol):
-        # تجربة One-Way Mode (0) ثم Hedge Mode (1 للشراء / 2 للبيع)
         for pos_idx in (0, 1 if buy else 2):
             body = {
                 "category": "linear", "symbol": sym, "side": "Buy" if buy else "Sell",
@@ -1619,7 +1643,6 @@ def tick_cycle(uid, chat_id, rt):
     if not free:
         return
     res = execute_ai_trade(uid, chat_id, free, rt=rt, manual=False)
-    # لا نوقف التداول الآلي عند الفشل المؤقت، بل ننتظر 30 ثانية ونعيد المحاولة لضمان استمرارية 24/7
     rt.next_analysis = time.time() + (COOLDOWN_AFTER_TRADE if res == "executed" else 30)
 
 
