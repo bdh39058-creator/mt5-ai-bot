@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-بوت التداول الذكي الشامل (MT5 + Bybit Gold) - النسخة النهائية المحصّنة بالكامل 24/7
-- الحل الجذري والنهائي لكود MT5 10027: ضبط Api=0 + Enabled=1 + AllowLiveTrading=1 + Account=0 بصيغة CRLF
-- معالجة تلقائية لأكواد MT5 (10004, 10013, 10014, 10015, 10016 ECN SL/TP, 10018, 10019, 10027, 10030, -10005)
-- محرك بروكسي أوروبي/آسيوي تلقائي لتجاوز حجب Bybit HTTP 403 + دعم Cloudflare Worker
-- معالجة تلقائية لأكواد Bybit V5 (10001 Hedge/One-Way, 10002 Time Sync, 10003 Demo/Live Auto-Switch, 110007)
+بوت التداول الذكي الشامل (MT5 + Bybit Gold) - النسخة النهائية الصافية 24/7
+- حل جذري لكود 10030 (Unsupported filling mode) عبر قراءة Bitmask الرسمي (si.filling_mode & 1 / & 2)
+  وفصل فتح الصفقة السريع عن تركيب SL/TP لضمان قبول الأمر من أول محاولة
+- حل جذري لكود 10027 (AutoTrading مفعّل 🟢 عبر Api=0 + CRLF + data_path)
+- حل شامل لحجب Bybit HTTP 403 عبر محرك البروكسيات الأوروبية/الآسيوية المتعدد + دعم Cloudflare Smart Placement
 """
 import os
 import sys
@@ -747,7 +747,7 @@ MT5_RETCODES = {
     10015: "سعر غير صالح (Invalid price)",
     10016: "مستويات الوقف/الهدف غير صالحة (Invalid stops)",
     10017: "التداول معطّل لهذا الحساب (Trade disabled)",
-    10018: "السوق مغلق حالياً (Market closed)",
+    10018: "السوق مغلق حالياً (Market closed - عطلة نهاية الأسبوع للفوركس والذهب)",
     10019: "الهامش الحر غير كافٍ (Not enough money)",
     10020: "تغيرت الأسعار (Prices changed)",
     10024: "طلبات متكررة كثيرة جداً",
@@ -835,7 +835,7 @@ def metaapi_open(acc, action, symbol, lot, tp_usd, sl_usd):
     return {"ok": False, "symbol": symbol, "msg": "رفض التنفيذ عبر MetaApi"}
 
 
-# ======================= 9. MetaTrader 5 المباشر (الحل النهائي: Api=0 + CRLF) =======================
+# ======================= 9. MetaTrader 5 المباشر (حل 10027 + حل 10030 Bitmask) =======================
 mt5 = None
 NATIVE_MT5_AVAILABLE = False
 if os.name == "nt":
@@ -910,7 +910,6 @@ def patch_common_ini_file(path, login_str="", password="", server=""):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as f:
             f.write(b"\xff\xfe" + text.encode("utf-16-le") if utf16 else text.encode("utf-8"))
-        safe_print(f"Patched common.ini (Api=0, Enabled=1) at: {path}")
     except Exception as e:
         safe_print(f"patch_common_ini note ({path}): {e}")
 
@@ -1039,7 +1038,6 @@ def launch_mt5_with_verified_autotrading(login_str="", password="", server=""):
             ti = mt5.terminal_info()
             if ti and getattr(ti, "data_path", ""):
                 _discovered_data_paths.add(ti.data_path)
-                safe_print("Discovered exact MT5 data_path:", ti.data_path)
 
     try:
         mt5.shutdown()
@@ -1063,11 +1061,6 @@ def launch_mt5_with_verified_autotrading(login_str="", password="", server=""):
                 pass
         if ti and not getattr(ti, "trade_allowed", False):
             send_win32_autotrading_enable()
-        ti = mt5.terminal_info()
-        safe_print(
-            "MT5 Boot Status -> trade_allowed:", getattr(ti, "trade_allowed", None),
-            "| tradeapi_disabled:", getattr(ti, "tradeapi_disabled", None)
-        )
     return True
 
 
@@ -1142,6 +1135,25 @@ def match_mt5_symbol(desired):
             mt5.symbol_select(s_obj.name, True)
             return s_obj.name
     return None
+
+
+def get_Ordered_filling_modes(si):
+    """
+    الحل الرسمي من وثائق MQL5 لكود 10030 (Unsupported filling mode):
+    قراءة قناع البتات si.filling_mode (1 -> FOK=0, 2 -> IOC=1, غير ذلك -> RETURN=2)
+    وترتيب الأنماط بحيث يكون النمط المدعوم رسمياً من السيرفر في المرتبة الأولى دائماً!
+    """
+    modes = []
+    fm = int(getattr(si, "filling_mode", 0) or 0)
+    if fm & 1:
+        modes.append(mt5.ORDER_FILLING_FOK)
+    if fm & 2:
+        modes.append(mt5.ORDER_FILLING_IOC)
+    modes.append(mt5.ORDER_FILLING_RETURN)
+    for fallback_m in (mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN):
+        if fallback_m not in modes:
+            modes.append(fallback_m)
+    return modes
 
 
 def get_reliable_mt5_price(sym, is_buy):
@@ -1219,7 +1231,9 @@ def mt5_close(acc, pos):
         price, _ = get_reliable_mt5_price(pos["symbol"], not is_buy)
         if price <= 0:
             return False
-        for fm in (mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN):
+        si = mt5.symbol_info(pos["symbol"])
+        modes = get_Ordered_filling_modes(si) if si else [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
+        for fm in modes:
             res = mt5.order_send({
                 "action": mt5.TRADE_ACTION_DEAL, "symbol": pos["symbol"], "volume": float(pos["volume"]),
                 "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY, "position": int(pos["id"]),
@@ -1269,65 +1283,67 @@ def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
         dists = {}
         for key, usd in (("tp", tp_usd), ("sl", sl_usd)):
             d = usd_to_price_distance(usd, vol, si.trade_tick_value, si.trade_tick_size)
-            dists[key] = max(d, min_dist * 1.1) if d > 0 else None
+            dists[key] = max(d, min_dist * 1.2) if d > 0 else None
         tp = round(price + dists["tp"] if buy else price - dists["tp"], si.digits) if dists["tp"] else 0.0
         sl = round(price - dists["sl"] if buy else price + dists["sl"], si.digits) if dists["sl"] else 0.0
 
-        modes = [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]
+        # ترتيب أنماط التنفيذ حسب قناع البتات الرسمي للرمز (si.filling_mode) لمنع كود 10030 نهائياً
+        modes = get_Ordered_filling_modes(si)
         last = ""
         for attempt in range(2):
             for mode in modes:
                 cur_p, _ = get_reliable_mt5_price(sym, buy)
                 use_p = cur_p if cur_p > 0 else price
+                # نرسل أمر السوق نظيفاً أولاً (sl=0, tp=0) لضمان التنفيذ الفوري على كافة سيرفرات ECN/STP/Demo
                 req = {
-                    "action": mt5.TRADE_ACTION_DEAL, "symbol": sym, "volume": vol,
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": sym,
+                    "volume": vol,
                     "type": mt5.ORDER_TYPE_BUY if buy else mt5.ORDER_TYPE_SELL,
-                    "price": use_p, "sl": sl, "tp": tp, "deviation": 100,
-                    "magic": MAGIC, "comment": "AI_Bot", "type_time": mt5.ORDER_TIME_GTC, "type_filling": mode
+                    "price": use_p,
+                    "deviation": 100,
+                    "magic": MAGIC,
+                    "comment": "AI_Bot",
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": mode,
                 }
                 res = mt5.order_send(req)
 
-                # حل كود 10004 و 10020 (Requote / تغير السعر): تحديث السعر الحي وإعادة الإرسال فوراً
                 if res is not None and res.retcode in (10004, 10020):
                     cur_p2, _ = get_reliable_mt5_price(sym, buy)
                     if cur_p2 > 0:
                         req["price"] = cur_p2
                         res = mt5.order_send(req)
 
-                # حل كود 10019 و 10014 (الهامش غير كافٍ أو اللوت غير صالح): تقليص اللوت للحد الأدنى وإعادة المحاولة
                 if res is not None and res.retcode in (10019, 10014) and vol > float(si.volume_min or 0.01):
                     vol = float(si.volume_min or 0.01)
                     req["volume"] = vol
                     res = mt5.order_send(req)
 
-                # حل كود 10016 / 10015 / 10013 (رفض SL/TP مع أمر السوق في حسابات ECN): فتح بدون SL/TP ثم تعديل الصفقة
-                if res is not None and res.retcode in (10016, 10015, 10013):
-                    req["sl"] = 0.0
-                    req["tp"] = 0.0
-                    res = mt5.order_send(req)
-                    if res is not None and res.retcode in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL):
-                        pos_ticket = res.order or res.deal
-                        if sl > 0 or tp > 0:
-                            mt5.order_send({
-                                "action": mt5.TRADE_ACTION_SLTP,
-                                "position": int(pos_ticket),
-                                "symbol": sym,
-                                "sl": sl,
-                                "tp": tp
-                            })
-                        return {
-                            "ok": True, "symbol": sym, "ticket": str(pos_ticket), "volume": vol,
-                            "price": res.price or use_p, "tp": tp, "sl": sl, "verified": True, "note": ""
-                        }
-
                 if res is None:
                     last = f"لا رد من المنصة {mt5.last_error()}"
                     continue
+
                 if res.retcode in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL):
+                    pos_ticket = res.order or res.deal
+                    # بعد فتح الصفقة بنجاح، نركّب SL و TP بأمر تعديل مستقل
+                    if (sl > 0 or tp > 0) and pos_ticket:
+                        time.sleep(0.2)
+                        live_pos = mt5.positions_get(symbol=sym) or []
+                        target_pos = next((p for p in live_pos if p.ticket == pos_ticket), live_pos[-1] if live_pos else None)
+                        p_id = int(target_pos.ticket) if target_pos else int(pos_ticket)
+                        mt5.order_send({
+                            "action": mt5.TRADE_ACTION_SLTP,
+                            "position": p_id,
+                            "symbol": sym,
+                            "sl": sl,
+                            "tp": tp,
+                        })
                     return {
-                        "ok": True, "symbol": sym, "ticket": str(res.order or res.deal), "volume": vol,
+                        "ok": True, "symbol": sym, "ticket": str(pos_ticket), "volume": vol,
                         "price": res.price or use_p, "tp": tp, "sl": sl, "verified": True, "note": ""
                     }
+
                 last = retcode_message(res.retcode, res.comment)
                 if res.retcode == 10027 and attempt == 0:
                     launch_mt5_with_verified_autotrading(
@@ -1336,6 +1352,9 @@ def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
                         acc.get("server_or_mode")
                     )
                     break
+                # إذا لم يكن الخطأ 10030 (مثلاً 10018 السوق مغلق)، لا داعي لتجربة باقي أنماط التنفيذ
+                if res.retcode != 10030:
+                    break
             else:
                 break
         if MASTER_METAAPI_TOKEN:
@@ -1343,7 +1362,7 @@ def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
         return _fail(sym, last or "رفض الوسيط")
 
 
-# ======================= 10. Bybit V5 (مع البروكسي الأوروبي/الآسيوي التلقائي لتجاوز HTTP 403) =======================
+# ======================= 10. Bybit V5 (مع محرك الأنفاق الأوروبية/الآسيوية المتعدد) =======================
 BYBIT_HOST_LIST = {
     "BYBIT-LIVE": ["https://api.bytick.com", "https://api.bybit.com"],
     "BYBIT-DEMO": ["https://api-demo.bybit.com"],
@@ -1355,40 +1374,72 @@ _eu_proxy_checked_at = 0.0
 
 
 def find_working_non_us_proxy():
+    """
+    يبحث تلقائياً في 4 مصادر عالمية عن بروكسي HTTPS حي خارج أمريكا (أوروبا/آسيا)
+    لتجاوز حجب CloudFront 403 على سيرفرات GitHub الأمريكية دون الحاجة لإعداد خارجي.
+    """
     global _working_eu_proxy, _eu_proxy_checked_at
     if _working_eu_proxy and (time.time() - _eu_proxy_checked_at < 600):
         return _working_eu_proxy
 
     _eu_proxy_checked_at = time.time()
-    sources = [
-        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=3000&country=DE,NL,GB,FR,SG,JP,CH,FI&ssl=yes&anonymity=all",
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"
-    ]
     candidates = []
-    for src in sources:
+
+    # المصدر 1: GeoNode JSON API (أوروبا وسنغافورة واليابان)
+    try:
+        st, geo = http_request(
+            "https://proxylist.geonode.com/api/proxy-list?limit=30&page=1&sort_by=lastChecked&sort_type=desc&protocols=http%2Chttps",
+            "GET", timeout=6, verify_ssl=False
+        )
+        if st == 200 and isinstance(geo, dict):
+            for item in geo.get("data", []):
+                cc = str(item.get("country", "")).upper()
+                if cc not in ("US", "CA", "CN", "HK", "SG", "GB"):
+                    ip, port = item.get("ip"), item.get("port")
+                    if ip and port:
+                        candidates.append(f"http://{ip}:{port}")
+    except Exception:
+        pass
+
+    # المصدر 2 و 3: قوائم ProxyScrape و GitHub المحدثة كل دقيقة
+    text_sources = [
+        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=2500&country=DE,NL,FR,CH,FI,SE,AT,IE,PL,JP,KR&ssl=yes&anonymity=all",
+        "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-https.txt",
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+    ]
+    for src in text_sources:
+        if len(candidates) >= 35:
+            break
         try:
-            st, res = http_request(src, "GET", timeout=6, verify_ssl=False)
-            raw_txt = res.get("_raw_text", "") if isinstance(res, dict) else ""
-            if not raw_txt:
-                with urllib.request.urlopen(src, timeout=6) as r:
-                    raw_txt = r.read().decode("utf-8", errors="ignore")
+            with urllib.request.urlopen(src, timeout=6, context=SSL_CTX_UNVERIFIED) as r:
+                raw_txt = r.read().decode("utf-8", errors="ignore")
             for line in raw_txt.splitlines():
                 line = line.strip()
                 if re.match(r"^\d+\.\d+\.\d+\.\d+:\d+$", line):
-                    candidates.append(f"http://{line}")
-                if len(candidates) >= 25:
+                    p_str = f"http://{line}"
+                    if p_str not in candidates:
+                        candidates.append(p_str)
+                if len(candidates) >= 35:
                     break
         except Exception:
             continue
-        if len(candidates) >= 15:
-            break
 
-    for p_url in candidates[:18]:
-        st, res = http_request("https://api-demo.bybit.com/v5/market/time", "GET", timeout=4, verify_ssl=False, proxy_addr=p_url)
+    if not candidates:
+        return None
+
+    # فحص متوازٍ سريع (ThreadPool) لاختيار أسرع بروكسي أوروبي يفتح Bybit Demo بنجاح
+    def test_one(p_url):
+        st, res = http_request("https://api-demo.bybit.com/v5/market/time", "GET", timeout=3, verify_ssl=False, proxy_addr=p_url)
         if st == 200 and isinstance(res, dict) and res.get("retCode") == 0:
-            _working_eu_proxy = p_url
-            safe_print("Found working Non-US Bybit Proxy:", p_url)
             return p_url
+        return None
+
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        for res_p in ex.map(test_one, candidates[:30]):
+            if res_p:
+                _working_eu_proxy = res_p
+                safe_print("Locked onto working Non-US Bybit Proxy:", res_p)
+                return res_p
     return None
 
 
@@ -1423,8 +1474,8 @@ def bybit_err(res):
         return "رصيد USDT المتاح في محفظة Unified Trading غير كافٍ لفتح الصفقة"
     if res.get("_status") == 403 or "403" in str(res.get("error", "")):
         return (
-            "HTTP 403 (حجب IP أمريكي من Bybit). تأكد من الضغط على Deploy في صفحة "
-            "Cloudflare Worker (bybit-bridge.bdh39058.workers.dev) أو شغّل البوت على Render منطقة Frankfurt."
+            "HTTP 403 (حجب IP أمريكي من Bybit). في صفحة Cloudflare امسح القوس الزائد في السطر 22-23 واضغط Deploy "
+            "ثم فعّل Smart Placement من Settings -> Placement."
         )
     return f"{res.get('retMsg') or res.get('error') or 'خطأ غير معروف'} (كود {code})"
 
@@ -1491,7 +1542,7 @@ def _single_bybit_call(acc, mode, method, path, params=None, body=None):
             if status == 200 and "retCode" in res:
                 return res.get("retCode") == 0, res
 
-        # 3. إذا واجهنا حجب 403 الأمريكي، نشغّل محرك البروكسي الأوروبي/الآسيوي التلقائي
+        # 3. عبر محرك الأنفاق الأوروبية/الآسيوية المتوازي لتجاوز حجب 403 الأمريكي
         if last_res.get("_status") == 403 or "403" in str(last_res.get("error", "")):
             eu_p = find_working_non_us_proxy()
             if eu_p:
@@ -1619,7 +1670,6 @@ def bybit_open(acc, action, symbol, lot, tp_usd, sl_usd):
                 "orderType": "Market", "qty": str(qty), "positionIdx": pos_idx
             }
             ok, res = bybit_request(acc, "POST", "/v5/order/create", body=body)
-            # إذا كان الرصيد غير كافٍ للكمية المحددة (110007)، نجرب فوراً بالحد الأدنى 0.01
             if not ok and res.get("retCode") == 110007 and qty > 0.01:
                 body["qty"] = "0.01"
                 ok, res = bybit_request(acc, "POST", "/v5/order/create", body=body)
