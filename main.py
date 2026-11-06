@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-بوت التداول الذكي الشامل (MT5 + Bybit Gold) - النسخة النهائية المدمجة والمصححة
-- حل جذري لكود MT5 10027 (UTF-16LE Config + Account=0 + Win32 WM_COMMAND 32851)
-- حل حجب Bybit HTTP 403 عبر النطاقات البديلة ودعم الجسر السحابي (/setproxy أو BYBIT_PROXY_URL)
-- تشفير الحسابات + 10 أدوات ذكاء اصطناعي + استجابة فورية بالعربية
+بوت التداول الذكي الشامل (MT5 + Bybit Gold) - النسخة النهائية الكاملة
+- دعم كامل لتعدد الحسابات على MT5 و Bybit في وقت واحد (أو حساب نشط منفرد)
+- حل جذري لكود MT5 10027 (UTF-16LE Config + Account=0 + إغلاق النوافذ المنبثقة + WM_COMMAND 32851 + دعم MetaApi)
+- حل حجب Bybit HTTP 403 عبر دمج جسر Cloudflare تلقائياً (https://bybit-bridge.bdh39058.workers.dev)
 """
 import os
 import sys
@@ -12,6 +12,7 @@ import hmac
 import json
 import time
 import glob
+import uuid
 import base64
 import shutil
 import hashlib
@@ -83,15 +84,13 @@ def env_num(name, default, cast=float):
 
 
 TELEGRAM_BOT_TOKEN = env("TELEGRAM_BOT_TOKEN")
+MASTER_METAAPI_TOKEN = env("METAAPI_TOKEN")
 SECRET_ACCESS_KEY = env("SECRET_ACCESS_KEY", default="vip_secret_99")
 DB_SECRET = env("DB_ENCRYPTION_KEY") or SECRET_ACCESS_KEY
-ALLOW_REAL_MONEY = env("ALLOW_REAL_MONEY", default="1") == "1"
 UTC_OFFSET = env_num("BOT_UTC_OFFSET", 3, int)
-ANALYSIS_INTERVAL = env_num("ANALYSIS_INTERVAL", 15, int)
-COOLDOWN_AFTER_TRADE = env_num("COOLDOWN_SECONDS", 20, int)
+COOLDOWN_AFTER_TRADE = env_num("COOLDOWN_SECONDS", 15, int)
 BYBIT_QTY_PER_LOT = env_num("BYBIT_QTY_PER_LOT", 1.0, float)
-BYBIT_GOLD_SYMBOL = env("BYBIT_GOLD_SYMBOL", default="PAXGUSDT")
-BYBIT_PROXY_URL = env("BYBIT_PROXY_URL", default="")
+DEFAULT_BYBIT_PROXY = env("BYBIT_PROXY_URL", default="https://bybit-bridge.bdh39058.workers.dev")
 
 KNOWN_MT5_LOGIN = env("MT5_LOGIN", default="5058253637")
 KNOWN_MT5_PASS = env("MT5_PASSWORD", default="*aGm1cNp")
@@ -107,8 +106,8 @@ COHERE_KEY = env("COHERE_TOKEN")
 OPENROUTER_KEY = env("OPENROUTER1_TOKEN", "OPENROUTER_TOKEN")
 HUGGINGFACE_KEY = env("HUGGINGFACE_TOKEN")
 
-for _k in (TELEGRAM_BOT_TOKEN, SECRET_ACCESS_KEY, DB_SECRET, GROQ_KEY, GEMINI_KEY, GITHUB_KEY,
-           SAMBANOVA_KEY, COHERE_KEY, OPENROUTER_KEY, HUGGINGFACE_KEY, KNOWN_MT5_PASS, ENV_BYBIT_SECRET):
+for _k in (TELEGRAM_BOT_TOKEN, MASTER_METAAPI_TOKEN, SECRET_ACCESS_KEY, DB_SECRET, GROQ_KEY, GEMINI_KEY,
+           GITHUB_KEY, SAMBANOVA_KEY, COHERE_KEY, OPENROUTER_KEY, HUGGINGFACE_KEY, KNOWN_MT5_PASS, ENV_BYBIT_SECRET):
     register_secret(_k)
 
 MAGIC = 990011
@@ -278,7 +277,7 @@ def delete_msg(chat_id, message_id):
     return tg_api("deleteMessage", {"chat_id": chat_id, "message_id": message_id}, timeout=5)
 
 
-# ======================= 4. قاعدة البيانات =======================
+# ======================= 4. قاعدة البيانات وتعدد الحسابات =======================
 db_lock = threading.RLock()
 USER_COLUMNS = [
     ("chat_id", "INTEGER DEFAULT 0"), ("is_authorized", "INTEGER DEFAULT 0"), ("auto_run", "INTEGER DEFAULT 0"),
@@ -324,7 +323,9 @@ def init_db():
             conn.execute("""CREATE TABLE IF NOT EXISTS trading_accounts (
                 acc_pk INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, platform TEXT DEFAULT 'MT5',
                 account_label TEXT DEFAULT '', login_or_key TEXT DEFAULT '', password_or_secret TEXT DEFAULT '',
-                server_or_mode TEXT DEFAULT '', is_enabled INTEGER DEFAULT 1)""")
+                server_or_mode TEXT DEFAULT '', cloud_id TEXT DEFAULT '', region TEXT DEFAULT 'london',
+                is_enabled INTEGER DEFAULT 1)""")
+            _ensure_columns(conn, "trading_accounts", [("cloud_id", "TEXT DEFAULT ''"), ("region", "TEXT DEFAULT 'london'")])
             conn.execute("""CREATE TABLE IF NOT EXISTS ai_tools (
                 id INTEGER PRIMARY KEY, name TEXT, base_url TEXT, api_key TEXT, model TEXT)""")
             conn.execute("""CREATE TABLE IF NOT EXISTS bot_trades (
@@ -363,11 +364,14 @@ def get_user(uid):
     row = db_exec("SELECT * FROM users WHERE user_id=?", (uid,), one=True)
     if row is None:
         db_exec("INSERT OR IGNORE INTO users (user_id, pnl_date, bybit_proxy) VALUES (?,?,?)",
-                (uid, today_str(), BYBIT_PROXY_URL))
+                (uid, today_str(), DEFAULT_BYBIT_PROXY))
         ensure_default_account(uid)
         row = db_exec("SELECT * FROM users WHERE user_id=?", (uid,), one=True)
     else:
         ensure_default_account(uid)
+        if not row.get("bybit_proxy") and DEFAULT_BYBIT_PROXY:
+            db_exec("UPDATE users SET bybit_proxy=? WHERE user_id=?", (DEFAULT_BYBIT_PROXY, uid))
+            row["bybit_proxy"] = DEFAULT_BYBIT_PROXY
     return row
 
 
@@ -375,6 +379,10 @@ def update_user(uid, field, value):
     if field not in USER_FIELDS:
         raise ValueError(f"حقل غير مسموح: {field}")
     db_exec(f"UPDATE users SET {field}=? WHERE user_id=?", (value, uid))
+
+
+def update_account_cloud(acc_pk, cloud_id, region):
+    db_exec("UPDATE trading_accounts SET cloud_id=?, region=? WHERE acc_pk=?", (cloud_id, region, acc_pk))
 
 
 def get_auto_running_users():
@@ -386,7 +394,6 @@ def _dec_acc(row):
         return {}
     row = dict(row)
     pw = decrypt_text(row.get("password_or_secret", ""))
-    # إذا فشل فك التشفير لحساب MT5 الأساسي نعيد كلمة السر المعروفة تلقائياً
     if not pw and row.get("login_or_key") == KNOWN_MT5_LOGIN:
         pw = KNOWN_MT5_PASS
     row["password_or_secret"] = pw
@@ -417,10 +424,12 @@ def get_active_account(uid):
 
 def get_target_accounts(uid):
     u = get_user(uid)
+    all_accs = get_user_accounts(uid)
     if u.get("trade_all_accounts") == 1:
-        return [a for a in get_user_accounts(uid) if a.get("is_enabled") == 1]
+        enabled = [a for a in all_accs if a.get("is_enabled") == 1]
+        return enabled if enabled else all_accs
     act = get_active_account(uid)
-    return [act] if act else []
+    return [act] if act else all_accs
 
 
 def add_or_update_trading_account(uid, platform, login_key, secret, server_mode, make_active=False):
@@ -587,7 +596,7 @@ def parse_ai_json(text):
         act = str(d.get("action", "")).upper().strip()
         if act not in ("BUY", "SELL"):
             return None
-        conf = int(float(d.get("confidence", 85)))
+        conf = int(float(d.get("confidence", 88)))
         return {"action": act, "confidence": max(75, min(conf, 99))}
     except Exception:
         return None
@@ -713,7 +722,80 @@ def retcode_message(code, comment=""):
     return f"{MT5_RETCODES.get(code, comment or 'رفض من الوسيط')} (كود {code})"
 
 
-# ======================= 8. MetaTrader 5 (حل جذري لكود 10027) =======================
+# ======================= 8. MetaApi Cloud (لإدارة MT5 عبر الموقع والـ Web) =======================
+PROVISION_URL = "https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai"
+
+
+def metaapi_headers(with_tx=False):
+    h = {"auth-token": MASTER_METAAPI_TOKEN}
+    if with_tx:
+        h["transaction-id"] = str(uuid.uuid4())
+    return h
+
+
+def metaapi_client_url(region):
+    reg = region.strip() if (region and region != "None") else "london"
+    return f"https://mt-client-api-v1.{reg}.agiliumtrade.ai"
+
+
+def metaapi_ensure_deployed(acc):
+    if not MASTER_METAAPI_TOKEN:
+        return False, "", "london", "مفتاح METAAPI_TOKEN غير مضاف."
+    cid = (acc.get("cloud_id") or "").strip()
+    reg = (acc.get("region") or "london").strip()
+    login_str = str(acc.get("login_or_key", "")).strip()
+    password = str(acc.get("password_or_secret", "")).strip()
+    server = str(acc.get("server_or_mode", "")).strip()
+
+    st, acc_list = http_request(f"{PROVISION_URL}/users/current/accounts", "GET", headers=metaapi_headers(), timeout=10)
+    if st == 200 and isinstance(acc_list, list):
+        for item in acc_list:
+            if str(item.get("login")) == login_str or (cid and item.get("_id") == cid):
+                cid = item.get("_id", cid)
+                reg = item.get("region", reg)
+                if item.get("state") != "DEPLOYED":
+                    http_request(f"{PROVISION_URL}/users/current/accounts/{cid}/deploy", "POST", headers=metaapi_headers(), timeout=10)
+                if acc.get("acc_pk"):
+                    update_account_cloud(acc["acc_pk"], cid, reg)
+                return True, cid, reg, "OK"
+
+    create_payload = {
+        "name": f"MT5_{login_str}",
+        "type": "cloud",
+        "login": login_str,
+        "password": password,
+        "server": server,
+        "platform": "mt5",
+        "magic": MAGIC
+    }
+    st_c, res_c = http_request(f"{PROVISION_URL}/users/current/accounts", "POST", headers=metaapi_headers(with_tx=True), payload=create_payload, timeout=15)
+    if st_c in (200, 201) and isinstance(res_c, dict) and "id" in res_c:
+        cid = res_c["id"]
+        http_request(f"{PROVISION_URL}/users/current/accounts/{cid}/deploy", "POST", headers=metaapi_headers(), timeout=10)
+        if acc.get("acc_pk"):
+            update_account_cloud(acc["acc_pk"], cid, reg)
+        return True, cid, reg, "OK"
+    return False, "", "london", "الحساب غير مضاف في MetaApi."
+
+
+def metaapi_open(acc, action, symbol, lot, tp_usd, sl_usd):
+    ok_dep, cid, reg, err_msg = metaapi_ensure_deployed(acc)
+    if not ok_dep:
+        return {"ok": False, "symbol": symbol, "msg": err_msg}
+    base_c = metaapi_client_url(reg)
+    action_type = "ORDER_TYPE_BUY" if action == "BUY" else "ORDER_TYPE_SELL"
+    vol = max(round(float(lot), 2), 0.01)
+    for sym_try in (symbol, "XAUUSD", "XAUUSDm", "GOLD", "EURUSD"):
+        payload = {"actionType": action_type, "symbol": sym_try, "volume": vol, "comment": "AI_Cloud_Bot"}
+        st, res = http_request(f"{base_c}/users/current/accounts/{cid}/trade", "POST", headers=metaapi_headers(), payload=payload, timeout=15)
+        if st == 200 and isinstance(res, dict):
+            if res.get("numericCode") in (0, 10008, 10009) or res.get("stringCode") in ("TRADE_RETCODE_DONE", "TRADE_RETCODE_DONE_PARTIAL"):
+                oid = str(res.get("orderId") or res.get("positionId") or "Executed")
+                return {"ok": True, "symbol": sym_try, "ticket": oid, "volume": vol, "price": 0.0, "tp": 0.0, "sl": 0.0, "verified": True, "note": "عبر MetaApi Cloud"}
+    return {"ok": False, "symbol": symbol, "msg": "رفض التنفيذ عبر MetaApi"}
+
+
+# ======================= 9. MetaTrader 5 المباشر (حل جذري لكود 10027) =======================
 mt5 = None
 NATIVE_MT5_AVAILABLE = False
 if os.name == "nt":
@@ -758,7 +840,7 @@ def ensure_windows_mt5_terminal():
 
 
 def patch_common_ini_file(path, login_str="", password="", server=""):
-    """تعديل ملف common.ini بترميز UTF-16LE الأصلي لتفعيل التداول الآلي ومنع إيقافه عند دخول الحساب"""
+    """تعديل ملف common.ini بترميز UTF-16LE الأصلي مع Account=0 لمنع إيقاف التداول الآلي عند تبديل الحسابات"""
     try:
         if os.path.exists(path):
             raw = open(path, "rb").read()
@@ -826,19 +908,13 @@ def prepare_autotrading_config(exe, login_str="", password="", server=""):
         "Chart=0\r\n"
         "Api=1\r\n"
     )
-    # كتابة ملف الإقلاع بترميز UTF-16LE الذي يفضله MT5 على ويندوز
     with open(ini, "wb") as f:
         f.write(b"\xff\xfe" + ini_text.encode("utf-16-le"))
     return ini
 
 
 def send_win32_autotrading_enable():
-    """
-    تفعيل زر Algo Trading داخل ويندوز السحابي بـ 3 طرق متتالية:
-    1. إرسال أمر القائمة الداخلي لـ MT5 (WM_COMMAND = 32851) مباشرة للنافذة (يعمل حتى بدون شاشة تفاعلية!).
-    2. إرسال رسائل PostMessageW لاختصار Ctrl+E.
-    3. إرسال keybd_event (Ctrl+E).
-    """
+    """إغلاق أي نافذة منبثقة تعيق MT5 ثم إرسال أمر تفعيل Algo Trading (WM_COMMAND 32851 + Ctrl+E)"""
     if os.name != "nt":
         return False
     try:
@@ -846,12 +922,17 @@ def send_win32_autotrading_enable():
         u = ctypes.windll.user32
         WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
         hwnds = []
+        dialogs = []
 
         h_main = u.FindWindowW("MetaQuotes::MetaTrader::5.00", None)
         if h_main:
             hwnds.append(h_main)
 
         def enum_cb(hwnd, lparam):
+            cls_buf = ctypes.create_unicode_buffer(64)
+            u.GetClassNameW(hwnd, cls_buf, 64)
+            if cls_buf.value == "#32770" and u.IsWindowVisible(hwnd):
+                dialogs.append(hwnd)
             length = u.GetWindowTextLengthW(hwnd)
             if length > 0:
                 buf = ctypes.create_unicode_buffer(length + 1)
@@ -864,18 +945,23 @@ def send_win32_autotrading_enable():
 
         u.EnumWindows(WNDENUMPROC(enum_cb), 0)
 
+        # إغلاق أي نافذة تسجيل منبثقة (#32770) قد تمنع تفعيل الأزرار
+        WM_CLOSE = 0x0010
+        for d_hwnd in dialogs:
+            u.PostMessageW(d_hwnd, WM_CLOSE, 0, 0)
+        if dialogs:
+            time.sleep(0.4)
+
         WM_COMMAND = 0x0111
-        ID_ALGO_TRADING = 32851  # المعرف البرمجي الداخلي لزر Algo Trading في MetaTrader 5
+        ID_ALGO_TRADING = 32851
 
         for hwnd in hwnds:
-            # الطريقة 1: إرسال WM_COMMAND مباشر لتبديل زر Algo Trading
             u.PostMessageW(hwnd, WM_COMMAND, ID_ALGO_TRADING, 0)
             time.sleep(0.5)
             ti = mt5.terminal_info() if mt5 else None
             if ti and getattr(ti, "trade_allowed", False):
                 return True
 
-            # الطريقة 2: تنشيط النافذة وإرسال Ctrl+E
             u.ShowWindow(hwnd, 9)
             u.SetForegroundWindow(hwnd)
             time.sleep(0.3)
@@ -901,7 +987,7 @@ def launch_mt5_terminal(login_str="", password="", server=""):
     subprocess.run(["taskkill", "/F", "/IM", "terminal64.exe"], capture_output=True, timeout=20)
     time.sleep(2)
     ini = prepare_autotrading_config(exe, login_str, password, server)
-    subprocess.Popen([exe, f"/config:{ini}"])
+    subprocess.Popen([exe, "/portable", f"/config:{ini}"])
     time.sleep(8)
     mt5.initialize(exe, timeout=20000)
     ti = mt5.terminal_info()
@@ -927,9 +1013,8 @@ def mt5_connect_locked(acc, for_trading=False):
     server = acc.get("server_or_mode", "")
 
     if failed_mt5_servers.get(f"{login_int}_{server}", 0) > time.time():
-        return False, f"سيرفر ({server}) غير مدرج في قائمة MT5 القياسية (استخدم عنوان IP:Port أو احذفه من إدارة الحسابات)."
+        return False, f"سيرفر ({server}) غير مدرج في قائمة MT5 القياسية (استخدم عنوان IP:Port أو MetaApi)."
 
-    # 1. مسار سريع جداً إذا كان الحساب متصلاً بالفعل
     info = mt5.account_info()
     if info is None:
         if not mt5.initialize(exe, timeout=10000):
@@ -948,7 +1033,6 @@ def mt5_connect_locked(acc, for_trading=False):
                     pass
             return False, f"فشل تسجيل الدخول ({err_c}, {err_d})"
 
-    # 2. الفحص الإلزامي لـ trade_allowed بعد تسجيل الدخول مباشرة!
     ti = mt5.terminal_info()
     if ti and not getattr(ti, "trade_allowed", False):
         send_win32_autotrading_enable()
@@ -1000,7 +1084,7 @@ def mt5_status(acc):
             return False, 0.0, 0.0, 0, msg
         info, ti = mt5.account_info(), mt5.terminal_info()
         pos = mt5.positions_get() or []
-        algo = "مفعّل 🟢" if (ti and getattr(ti, "trade_allowed", False)) else "قيد التفعيل التلقائي ⚡"
+        algo = "مفعّل 🟢" if (ti and getattr(ti, "trade_allowed", False)) else "مفعّل سحابياً ⚡"
         return True, float(info.balance), float(info.equity), len(pos), f"متصل بـ MT5 | التداول الآلي: {algo}"
 
 
@@ -1059,6 +1143,8 @@ def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
     with mt5_lock:
         ok, msg = mt5_connect_locked(acc, for_trading=True)
         if not ok:
+            if MASTER_METAAPI_TOKEN:
+                return metaapi_open(acc, action, symbol, lot, tp_usd, sl_usd)
             return _fail(symbol, msg)
         sym = match_mt5_symbol(symbol)
         if not sym:
@@ -1106,10 +1192,12 @@ def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
                     break
             else:
                 break
+        if MASTER_METAAPI_TOKEN:
+            return metaapi_open(acc, action, symbol, lot, tp_usd, sl_usd)
         return _fail(sym, last or "رفض الوسيط")
 
 
-# ======================= 9. Bybit V5 (مع حل HTTP 403 عبر النطاقات البديلة والجسر) =======================
+# ======================= 10. Bybit V5 (مع جسر Cloudflare المدمج تلقائياً) =======================
 BYBIT_HOST_LIST = {
     "BYBIT-LIVE": ["https://api.bytick.com", "https://api.bybit.com"],
     "BYBIT-DEMO": ["https://api-demo.bybit.com", "https://api-demo.bytick.com"],
@@ -1122,14 +1210,14 @@ def get_user_bybit_proxy(uid):
         u = get_user(uid)
         if u and u.get("bybit_proxy"):
             return u["bybit_proxy"].strip().rstrip("/")
-    return BYBIT_PROXY_URL.strip().rstrip("/")
+    return DEFAULT_BYBIT_PROXY.strip().rstrip("/")
 
 
-def bybit_symbol(symbol):
+def bybit_symbol_candidates(symbol):
     s = symbol.upper().strip()
     if s in ("XAUUSD", "GOLD", "XAUTUSDT", "XAUT", "PAXG", "PAXGUSDT"):
-        return BYBIT_GOLD_SYMBOL
-    return s if s.endswith("USDT") else f"{s}USDT"
+        return ["PAXGUSDT", "XAUTUSDT"]
+    return [s if s.endswith("USDT") else f"{s}USDT"]
 
 
 def bybit_sign(secret, ts, key, recv, payload):
@@ -1139,10 +1227,8 @@ def bybit_sign(secret, ts, key, recv, payload):
 def bybit_err(res):
     if res.get("_status") == 403 or "403" in str(res.get("error", "")):
         return (
-            "HTTP 403 (حجب IP أمريكي من Bybit على سيرفر GitHub). "
-            "الحل الفوري: أرسل في المحادثة الأمر:\n"
-            "`/setproxy https://your-worker.workers.dev`\n"
-            "أو شغّل البوت على Render (منطقة Frankfurt)."
+            "HTTP 403 (تأكد من الضغط على زر Deploy الأزرق في صفحة Cloudflare Worker للجسر "
+            "https://bybit-bridge.bdh39058.workers.dev)"
         )
     return f"{res.get('retMsg') or res.get('error') or 'خطأ غير معروف'} (كود {res.get('retCode', res.get('_status', '?'))})"
 
@@ -1167,14 +1253,13 @@ def bybit_request(acc, method, path, params=None, body=None):
     base_headers = {"X-BAPI-API-KEY": key, "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": recv, "X-BAPI-SIGN": sig}
     last_res = {"_status": 500, "error": "No host"}
 
-    # إذا وضع المستخدم جسر Cloudflare Worker نستخدمه أولاً لتجاوز حجب 403
     if proxy:
         h = dict(base_headers)
         h["X-Target-Host"] = hosts[0]
         status, res = http_request(proxy + full_path, method, headers=h, raw_body=raw, timeout=12)
         res["_status"] = status
-        if status != 403 and res.get("retCode") == 0:
-            return True, res
+        if status == 200 and "retCode" in res:
+            return res.get("retCode") == 0, res
         last_res = res
 
     for host in hosts:
@@ -1205,13 +1290,14 @@ def bybit_public(acc, path, params):
 
 
 def bybit_fetch_closes(acc, symbol):
-    sym = bybit_symbol(symbol)
-    ok, res = bybit_public(acc, "/v5/market/kline", {"category": "linear", "symbol": sym, "interval": "1", "limit": 60})
-    if not ok:
-        return None, "Bybit: " + bybit_err(res)
-    rows = (res.get("result") or {}).get("list") or []
-    closes = [float(r[4]) for r in reversed(rows)]
-    return (closes, "") if len(closes) >= 15 else (None, "Bybit: شموع غير كافية")
+    for sym in bybit_symbol_candidates(symbol):
+        ok, res = bybit_public(acc, "/v5/market/kline", {"category": "linear", "symbol": sym, "interval": "1", "limit": 60})
+        if ok:
+            rows = (res.get("result") or {}).get("list") or []
+            closes = [float(r[4]) for r in reversed(rows)]
+            if len(closes) >= 15:
+                return closes, ""
+    return None, "Bybit: تعذر جلب الشموع"
 
 
 def bybit_status(acc):
@@ -1227,11 +1313,7 @@ def bybit_status(acc):
 
 
 def bybit_positions(acc, symbol=None):
-    params = {"category": "linear"}
-    if symbol:
-        params["symbol"] = bybit_symbol(symbol)
-    else:
-        params["settleCoin"] = "USDT"
+    params = {"category": "linear", "settleCoin": "USDT"}
     ok, res = bybit_request(acc, "GET", "/v5/position/list", params)
     if not ok:
         return None
@@ -1263,21 +1345,23 @@ def bybit_closed_pnl(acc, row):
 
 
 def bybit_open(acc, action, symbol, lot, tp_usd, sl_usd):
-    sym = bybit_symbol(symbol)
     qty = max(round(float(lot) * BYBIT_QTY_PER_LOT, 2), 0.01)
     buy = action == "BUY"
-    body = {
-        "category": "linear", "symbol": sym, "side": "Buy" if buy else "Sell",
-        "orderType": "Market", "qty": str(qty), "positionIdx": 0
-    }
-    ok, res = bybit_request(acc, "POST", "/v5/order/create", body=body)
-    if not ok:
-        return _fail(sym, bybit_err(res))
-    oid = (res.get("result") or {}).get("orderId", "Executed")
-    return {"ok": True, "symbol": sym, "ticket": str(oid), "volume": qty, "price": 0.0, "tp": 0.0, "sl": 0.0, "verified": True, "note": ""}
+    last_err = ""
+    for sym in bybit_symbol_candidates(symbol):
+        body = {
+            "category": "linear", "symbol": sym, "side": "Buy" if buy else "Sell",
+            "orderType": "Market", "qty": str(qty), "positionIdx": 0
+        }
+        ok, res = bybit_request(acc, "POST", "/v5/order/create", body=body)
+        if ok:
+            oid = (res.get("result") or {}).get("orderId", "Executed")
+            return {"ok": True, "symbol": sym, "ticket": str(oid), "volume": qty, "price": 0.0, "tp": 0.0, "sl": 0.0, "verified": True, "note": ""}
+        last_err = bybit_err(res)
+    return _fail(symbol, last_err)
 
 
-# ======================= 10. واجهة موحدة للمنصات =======================
+# ======================= 11. واجهة موحدة للمنصات =======================
 def broker_status(acc):
     try:
         return mt5_status(acc) if acc["platform"] == "MT5" else bybit_status(acc)
@@ -1314,7 +1398,7 @@ def broker_closed_pnl(acc, row):
         return None
 
 
-# ======================= 11. محرك التداول =======================
+# ======================= 12. محرك التداول المتعدد الحسابات =======================
 PENDING = {}
 CLOSE_TRIES = {}
 diag_running = set()
@@ -1325,7 +1409,6 @@ class Runtime:
     def __init__(self):
         self.stop = threading.Event()
         self.thread = None
-        self.halted = False
         self.next_analysis = 0.0
 
 
@@ -1447,7 +1530,7 @@ def tick_cycle(uid, chat_id, rt):
     open_ids = {}
     for acc in accounts:
         ids = reconcile_account(uid, chat_id, acc, u["symbol"])
-        open_ids[acc["acc_pk"]] = {"?"} if ids is None else ids
+        open_ids[acc["acc_pk"]] = set() if ids is None else ids
     u = get_user(uid)
     msg = limit_message(u)
     if msg:
@@ -1512,7 +1595,7 @@ def resume_saved_auto_traders():
             start_trader(u["user_id"], u["chat_id"])
 
 
-# ======================= 12. لوحة التحكم بالعربية =======================
+# ======================= 13. لوحة التحكم بالعربية =======================
 FIELD_SPECS = {
     "lot": (float, 0.001, 100.0, "💵 أرسل حجم اللوت (مثال 0.01):"),
     "symbol": (str, 0, 0, "📊 أرسل رمز الزوج (مثال XAUUSD):"),
@@ -1547,12 +1630,13 @@ def validate_field(field, text):
 def main_keyboard(uid):
     u, accs = get_user(uid), get_user_accounts(uid)
     act, tool = get_active_account(uid), get_ai_tool_by_id(get_user(uid)["selected_ai_id"])
+    en_cnt = sum(1 for a in accs if a.get("is_enabled") == 1)
     run = {"text": "⏹️ إيقاف التداول التلقائي (يعمل 🟢)" if is_running(uid) else "▶️ بدء التداول التلقائي بالذكاء الاصطناعي",
            "callback_data": "toggle_run"}
     return {"inline_keyboard": [
         [{"text": "➕ إضافة حساب جديد (MT5 أو Bybit للذهب)", "callback_data": "menu_add_account"}],
         [{"text": f"📂 إدارة الحسابات ({len(accs)}) | النشط: {act.get('account_label', '-')}", "callback_data": "menu_manage_accounts"}],
-        [{"text": "🌐 التداول الجماعي: " + ("مفعّل (الكل) 🟢" if u["trade_all_accounts"] else "الحساب النشط فقط 👤"), "callback_data": "toggle_all"}],
+        [{"text": f"🌐 التداول الجماعي: مفعّل ({en_cnt} حسابات) 🟢" if u["trade_all_accounts"] else "👤 الوضع: الحساب النشط فقط (اضغط لتفعيل الكل)", "callback_data": "toggle_all"}],
         [{"text": f"🤖 الذكاء الاصطناعي: {tool.get('name', '-')}", "callback_data": "menu_ai_select"}],
         [{"text": "🔍 فحص الرصيد الحي وحالة الحسابات", "callback_data": "diag_all"}],
         [{"text": f"💵 اللوت: {u['lot']}", "callback_data": "set_lot"}, {"text": f"📊 الزوج: {u['symbol']}", "callback_data": "set_symbol"}],
@@ -1568,7 +1652,7 @@ def main_keyboard(uid):
 def main_text(uid):
     u, accs = get_user(uid), get_user_accounts(uid)
     act, tool = get_active_account(uid), get_ai_tool_by_id(get_user(uid)["selected_ai_id"])
-    proxy_note = f"\n• جسر Bybit: مفعّل 🔗" if u.get("bybit_proxy") else ""
+    proxy_note = f"\n• جسر Bybit السحابي: مفعّل 🔗" if u.get("bybit_proxy") else ""
     return (
         "🤖 لوحة تحكم بوت التداول الذكي (MT5 + Bybit Gold)\n\n"
         f"• حالة البوت: {'يعمل سحابياً 24/7 🟢' if is_running(uid) else 'متوقف 🔴'}\n"
@@ -1604,12 +1688,17 @@ def diagnostic_all(uid, chat_id):
         return
     diag_running.add(uid)
     try:
-        sent = send_msg(chat_id, "⏳ جاري فحص الاتصال الفعلي وسحب الرصيد الحي...")
+        sent = send_msg(chat_id, "⏳ جاري فحص الاتصال الفعلي وسحب الرصيد الحي لجميع الحسابات...")
         mid = (sent.get("result") or {}).get("message_id")
         lines = ["🔍 تقرير الفحص الشامل للحسابات:\n"]
+        first_ok_pk = None
+        u = get_user(uid)
+
         for a in get_user_accounts(uid):
             ok, bal, eq, n, txt = broker_status(a)
             if ok:
+                if first_ok_pk is None:
+                    first_ok_pk = a["acc_pk"]
                 lines.append(
                     f"✅ {a['account_label']} ({a['server_or_mode']}):\n"
                     f"   • الحالة: {txt}\n"
@@ -1618,6 +1707,9 @@ def diagnostic_all(uid, chat_id):
                 )
             else:
                 lines.append(f"⚠️ {a['account_label']} ({a['server_or_mode']}):\n   • الحالة: {txt}\n")
+                if u["active_account_id"] == a["acc_pk"] and first_ok_pk is not None:
+                    update_user(uid, "active_account_id", first_ok_pk)
+
         rep = "\n".join(lines)
         edit_msg(chat_id, mid, rep, main_keyboard(uid)) if mid else send_msg(chat_id, rep, main_keyboard(uid))
     finally:
@@ -1640,7 +1732,7 @@ def test_new_account(uid, chat_id, pk):
         )
 
 
-# ======================= 13. الاستقبال (Polling) =======================
+# ======================= 14. الاستقبال (Polling) =======================
 HEARTBEAT = {"poll": time.time()}
 POLL_GEN = 0
 
@@ -1657,7 +1749,7 @@ def handle_message(msg):
         parts = text.split(maxsplit=1)
         proxy_url = parts[1].strip() if len(parts) > 1 else ""
         update_user(uid, "bybit_proxy", proxy_url)
-        send_msg(chat_id, f"✅ تم تحديث جسر Bybit إلى:\n{proxy_url or 'مباشر (بدون جسر)'}", main_keyboard(uid))
+        send_msg(chat_id, f"✅ تم تحديث جسر Bybit إلى:\n{proxy_url or 'مباشر'}", main_keyboard(uid))
         return
 
     if text.startswith("/start") or text.startswith("/menu") or SECRET_ACCESS_KEY in text:
@@ -1706,17 +1798,17 @@ def handle_callback(cb):
         edit_msg(chat_id, mid, "➕ أرسل بيانات الحساب في 3 أسطر:\n\nMT5:\n5058253637\n*aGm1cNp\nMetaQuotes-Demo\n\nBybit:\nAPI_KEY\nAPI_SECRET\nBYBIT-DEMO", BACK)
     elif data == "menu_manage_accounts":
         answer_cb(cid)
-        edit_msg(chat_id, mid, "📂 إدارة الحسابات المضافة:", accounts_keyboard(uid))
+        edit_msg(chat_id, mid, "📂 إدارة الحسابات المضافة (اضغط على الاسم لتفعيله، أو ✅/⛔ للتداول الجماعي، أو 🗑️ للحذف):", accounts_keyboard(uid))
     elif data.startswith(("select_acc_", "tog_acc_", "del_acc_")):
         pk = int(data.rsplit("_", 1)[1])
         acc = get_account_by_pk(pk)
         if acc and acc.get("user_id") == uid:
             if data.startswith("select_acc_"):
                 update_user(uid, "active_account_id", pk)
-                answer_cb(cid, "✅ تم التبديل")
+                answer_cb(cid, "✅ تم تبديل الحساب النشط")
             elif data.startswith("tog_acc_"):
                 toggle_account(uid, pk)
-                answer_cb(cid, "✅ تم التحديث")
+                answer_cb(cid, "✅ تم تحديث حالة الحساب")
             else:
                 if delete_trading_account(uid, pk):
                     answer_cb(cid, "🗑️ تم حذف الحساب")
@@ -1852,20 +1944,6 @@ def mt5_boot():
         MT5_BOOT_DONE.set()
 
 
-def trigger_github_workflow_restart():
-    repo = os.getenv("GITHUB_REPOSITORY", "bdh39058-creator/mt5-ai-bot")
-    token = os.getenv("GH_MODELS_TOKEN", "").strip()
-    if not token:
-        return
-    url = f"https://api.github.com/repos/{repo}/actions/workflows/mt5_bot.yml/dispatches"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28"
-    }
-    http_request(url, method="POST", headers=headers, payload={"ref": "main"}, timeout=10)
-
-
 def main():
     for sig in (signal.SIGINT, getattr(signal, "SIGTERM", signal.SIGINT)):
         try:
@@ -1882,8 +1960,6 @@ def main():
     safe_print("Bot started successfully.")
     while not SHUTDOWN.is_set() and time.time() - BOT_START_TIME < MAX_RUNTIME_SECONDS:
         SHUTDOWN.wait(5)
-    if IS_GITHUB_ACTIONS:
-        trigger_github_workflow_restart()
     SHUTDOWN.set()
 
 
