@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-بوت التداول الذكي الشامل (MT5 + Bybit Gold) - النسخة النهائية الكاملة ذاتية الإصلاح
-- حل جذري ونهائي لكود 10027 عبر استخراج mt5.terminal_info().data_path الفعلي + ملف إقلاع ASCII بدون BOM + WM_COMMAND 32851
-- حذف تلقائي للحسابات الفرعية غير المعرفة (مثل BlackBullMarkets-Demo 939713) لمنع بطء الفحص
-- معالجة شاملة لجميع أكواد MT5 (10014, 10016, 10018, 10019, 10026, 10027, 10030)
-- معالجة شاملة لجميع أكواد Bybit (HTTP 403, 10001, 10002, 10003 التبديل التلقائي بين Demo/Live, 110007)
+بوت التداول الذكي الشامل (MT5 + Bybit Gold) - النسخة النهائية المحصّنة بالكامل 24/7
+- الحل الجذري والنهائي لكود MT5 10027: ضبط Api=0 + Enabled=1 + AllowLiveTrading=1 + Account=0 بصيغة CRLF
+- معالجة تلقائية لأكواد MT5 (10004, 10013, 10014, 10015, 10016 ECN SL/TP, 10018, 10019, 10027, 10030, -10005)
+- محرك بروكسي أوروبي/آسيوي تلقائي لتجاوز حجب Bybit HTTP 403 + دعم Cloudflare Worker
+- معالجة تلقائية لأكواد Bybit V5 (10001 Hedge/One-Way, 10002 Time Sync, 10003 Demo/Live Auto-Switch, 110007)
 """
 import os
 import sys
@@ -153,7 +153,7 @@ def _parse_json(raw):
         return {"_raw_text": text[:300]}
 
 
-def http_request(url, method="GET", headers=None, payload=None, raw_body=None, timeout=15, verify_ssl=True):
+def http_request(url, method="GET", headers=None, payload=None, raw_body=None, timeout=15, verify_ssl=True, proxy_addr=None):
     h = {"User-Agent": BROWSER_UA, "Accept": "application/json"}
     if headers:
         h.update(headers)
@@ -167,8 +167,15 @@ def http_request(url, method="GET", headers=None, payload=None, raw_body=None, t
     req = urllib.request.Request(url, data=data, headers=h, method=method)
     ctx = SSL_CTX_DEFAULT if verify_ssl else SSL_CTX_UNVERIFIED
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
-            return r.status, _parse_json(r.read())
+        if proxy_addr:
+            proxy_handler = urllib.request.ProxyHandler({"http": proxy_addr, "https": proxy_addr})
+            https_handler = urllib.request.HTTPSHandler(context=ctx)
+            opener = urllib.request.build_opener(proxy_handler, https_handler)
+            with opener.open(req, timeout=timeout) as r:
+                return r.status, _parse_json(r.read())
+        else:
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+                return r.status, _parse_json(r.read())
     except urllib.error.HTTPError as e:
         try:
             body = e.read()
@@ -348,7 +355,6 @@ def init_db():
             for d in AI_DEFS:
                 conn.execute("INSERT OR REPLACE INTO ai_tools (id,name,base_url,api_key,model) VALUES (?,?,?,?,?)",
                              (d[0], d[1], d[2], "", d[3]))
-            # تنظيف الحساب الفرعي المعطوب 939713 (BlackBullMarkets-Demo) الذي يسبب IPC timeout
             conn.execute("DELETE FROM trading_accounts WHERE login_or_key='939713' AND server_or_mode LIKE '%BlackBull%'")
             for pk, pw in conn.execute("SELECT acc_pk, password_or_secret FROM trading_accounts").fetchall():
                 if pw and not pw.startswith("enc1:"):
@@ -679,7 +685,7 @@ def decide_trade(uid, symbol, accounts):
     }
 
 
-# ======================= 7. أدوات حسابية وتعديل INI =======================
+# ======================= 7. أدوات حسابية وتعديل INI بصيغة ويندوز CRLF =======================
 def usd_to_price_distance(usd, volume, tick_value, tick_size):
     if min(usd, volume, tick_value, tick_size) <= 0:
         return 0.0
@@ -706,7 +712,7 @@ def is_within_working_hours(start_h, end_h, hour=None):
 
 
 def set_ini_values(text, section, kv):
-    nl = "\r\n" if "\r\n" in text else "\n"
+    nl = "\r\n"
     pending, out, in_sec, found = dict(kv), [], False, False
     for line in text.splitlines():
         s = line.strip()
@@ -716,7 +722,7 @@ def set_ini_values(text, section, kv):
                 pending = {}
             in_sec = s[1:-1].lower() == section.lower()
             found = found or in_sec
-            out.append(line)
+            out.append(s)
             continue
         if in_sec and "=" in s:
             k = s.split("=", 1)[0].strip()
@@ -724,7 +730,7 @@ def set_ini_values(text, section, kv):
                 if pk.lower() == k.lower():
                     line = f"{pk}={pending.pop(pk)}"
                     break
-        out.append(line)
+        out.append(line.rstrip("\r\n"))
     if in_sec:
         out.extend(f"{k}={v}" for k, v in pending.items())
     elif not found:
@@ -743,8 +749,9 @@ MT5_RETCODES = {
     10017: "التداول معطّل لهذا الحساب (Trade disabled)",
     10018: "السوق مغلق حالياً (Market closed)",
     10019: "الهامش الحر غير كافٍ (Not enough money)",
+    10020: "تغيرت الأسعار (Prices changed)",
     10024: "طلبات متكررة كثيرة جداً",
-    10026: "التداول الآلي معطّل من سيرفر الوسيط (تأكد من استخدام كلمة المرور الرئيسية وليس المشاهد)",
+    10026: "التداول الآلي معطّل من سيرفر الوسيط (استخدم كلمة السر الرئيسية وليس المشاهد)",
     10027: "التداول الآلي معطّل في المنصة (AutoTrading disabled)",
     10030: "نمط التنفيذ غير مدعوم (Unsupported filling mode)",
     10031: "لا يوجد اتصال بسيرفر التداول",
@@ -828,7 +835,7 @@ def metaapi_open(acc, action, symbol, lot, tp_usd, sl_usd):
     return {"ok": False, "symbol": symbol, "msg": "رفض التنفيذ عبر MetaApi"}
 
 
-# ======================= 9. MetaTrader 5 المباشر (حل جذري لكود 10027 عبر data_path الفعلي) =======================
+# ======================= 9. MetaTrader 5 المباشر (الحل النهائي: Api=0 + CRLF) =======================
 mt5 = None
 NATIVE_MT5_AVAILABLE = False
 if os.name == "nt":
@@ -874,7 +881,6 @@ def ensure_windows_mt5_terminal():
 
 
 def patch_common_ini_file(path, login_str="", password="", server=""):
-    """تعديل ملف common.ini الداخلي بترميز UTF-16LE وبالإعدادات الكاملة لتفعيل Algo Trading"""
     try:
         if os.path.exists(path):
             raw = open(path, "rb").read()
@@ -899,13 +905,12 @@ def patch_common_ini_file(path, login_str="", password="", server=""):
             "Account": "0",
             "Profile": "0",
             "Chart": "0",
-            "Api": "1",
-            "WebRequest": "1"
+            "Api": "0"
         })
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as f:
             f.write(b"\xff\xfe" + text.encode("utf-16-le") if utf16 else text.encode("utf-8"))
-        safe_print(f"Patched common.ini at: {path}")
+        safe_print(f"Patched common.ini (Api=0, Enabled=1) at: {path}")
     except Exception as e:
         safe_print(f"patch_common_ini note ({path}): {e}")
 
@@ -916,25 +921,20 @@ def prepare_autotrading_config(exe, login_str="", password="", server=""):
     server = server or KNOWN_MT5_SERVER
 
     paths = set()
-    # 1. المسارات الفعلية المكتشفة من mt5.terminal_info().data_path
     for dp in list(_discovered_data_paths):
         if dp:
             paths.add(os.path.join(dp, "config", "common.ini"))
-            paths.add(os.path.join(dp, "Config", "common.ini"))
 
-    # 2. المسارات القياسية في كافة مجلدات المستخدمين على ويندوز
     for env_var in ("APPDATA", "LOCALAPPDATA", "USERPROFILE"):
         base_d = os.environ.get(env_var, "")
         if base_d:
             for p in glob.glob(os.path.join(base_d, "**", "MetaQuotes", "Terminal", "*", "config", "common.ini"), recursive=True):
                 paths.add(p)
     paths.add(os.path.join(os.path.dirname(exe), "config", "common.ini"))
-    paths.add(os.path.join(os.path.dirname(exe), "Config", "common.ini"))
 
     for p in paths:
         patch_common_ini_file(p, login_str, password, server)
 
-    # 3. ملف الإقلاع المُمرر عبر /config: يجب أن يكون بترميز ASCII خالٍ تماماً من BOM حتى يقرأه MT5!
     ini = os.path.join(tempfile.gettempdir(), "mt5_startup.ini")
     ini_text = (
         "[Common]\r\n"
@@ -945,6 +945,9 @@ def prepare_autotrading_config(exe, login_str="", password="", server=""):
         "NewsEnable=0\r\n"
         "CertInstall=1\r\n"
         "\r\n"
+        "[StartUp]\r\n"
+        "Symbol=XAUUSD\r\n"
+        "\r\n"
         "[Experts]\r\n"
         "AllowLiveTrading=1\r\n"
         "Enabled=1\r\n"
@@ -952,7 +955,7 @@ def prepare_autotrading_config(exe, login_str="", password="", server=""):
         "Account=0\r\n"
         "Profile=0\r\n"
         "Chart=0\r\n"
-        "Api=1\r\n"
+        "Api=0\r\n"
     )
     with open(ini, "wb") as f:
         f.write(ini_text.encode("ascii", errors="ignore"))
@@ -960,14 +963,10 @@ def prepare_autotrading_config(exe, login_str="", password="", server=""):
 
 
 def send_win32_autotrading_enable():
-    """
-    تفعيل زر Algo Trading عبر إرسال أوامر القوائم المباشرة (WM_COMMAND) إلى نافذة MT5
-    وفروعها دون الحاجة إلى شاشة تفاعلية.
-    """
     if os.name != "nt" or not mt5:
         return False
     ti = mt5.terminal_info()
-    if ti and getattr(ti, "trade_allowed", False):
+    if ti and getattr(ti, "trade_allowed", False) and not getattr(ti, "tradeapi_disabled", False):
         return True
 
     try:
@@ -1004,17 +1003,14 @@ def send_win32_autotrading_enable():
             time.sleep(0.3)
 
         WM_COMMAND = 0x0111
-        # إرسال معرفات زر Algo Trading القياسية في إصدارات MT5 المختلفة، وفحص trade_allowed بعد كل معرف فوراً
         for cmd_id in (32851, 33021, 32850, 32852):
             for hwnd in hwnds:
                 u.PostMessageW(hwnd, WM_COMMAND, cmd_id, 0)
             time.sleep(0.4)
             ti = mt5.terminal_info()
             if ti and getattr(ti, "trade_allowed", False):
-                safe_print(f"Algo Trading enabled via WM_COMMAND {cmd_id}!")
                 return True
 
-        # محاولة إضافية عبر WScript.Shell SendKeys
         ps_cmd = (
             "$ws = New-Object -ComObject WScript.Shell; "
             "$p = Get-Process terminal64 -ErrorAction SilentlyContinue | Select-Object -First 1; "
@@ -1031,12 +1027,6 @@ def send_win32_autotrading_enable():
 
 
 def launch_mt5_with_verified_autotrading(login_str="", password="", server=""):
-    """
-    الطريقة الجذرية المضمونة 100% لتفعيل Algo Trading على سيرفرات Windows السحابية:
-    1. تشغيل أولي سريع لاستخراج المسار الفعلي mt5.terminal_info().data_path.
-    2. إذا كان trade_allowed == False، نغلق المنصة، نعدّل ملف common.ini داخل data_path الفعلي،
-       ونشغّل المنصة بملف إقلاع ASCII بدون BOM حتى يصبح trade_allowed == True من لحظة الإقلاع!
-    """
     exe = find_mt5_terminal_exe()
     if not exe:
         return False
@@ -1044,19 +1034,13 @@ def launch_mt5_with_verified_autotrading(login_str="", password="", server=""):
     password = password or KNOWN_MT5_PASS
     server = server or KNOWN_MT5_SERVER
 
-    # خطوة استكشاف data_path إن لم يكن معروفاً بعد
     if not _discovered_data_paths:
         if mt5.initialize(exe, timeout=20000):
             ti = mt5.terminal_info()
             if ti and getattr(ti, "data_path", ""):
                 _discovered_data_paths.add(ti.data_path)
                 safe_print("Discovered exact MT5 data_path:", ti.data_path)
-            if ti and getattr(ti, "trade_allowed", False):
-                mt5.login(int(login_str), password=password, server=server, timeout=15000)
-                if getattr(mt5.terminal_info(), "trade_allowed", False):
-                    return True
 
-    # إغلاق المنصة تماماً حتى لا تعيد كتابة common.ini القديم
     try:
         mt5.shutdown()
     except Exception:
@@ -1064,7 +1048,6 @@ def launch_mt5_with_verified_autotrading(login_str="", password="", server=""):
     subprocess.run(["taskkill", "/F", "/IM", "terminal64.exe"], capture_output=True, timeout=20)
     time.sleep(2)
 
-    # تعديل common.ini في المسار الفعلي المكتشف + إنشاء ملف إقلاع ASCII خالٍ من BOM
     ini = prepare_autotrading_config(exe, login_str, password, server)
     subprocess.Popen([exe, f"/config:{ini}"])
     time.sleep(8)
@@ -1081,7 +1064,10 @@ def launch_mt5_with_verified_autotrading(login_str="", password="", server=""):
         if ti and not getattr(ti, "trade_allowed", False):
             send_win32_autotrading_enable()
         ti = mt5.terminal_info()
-        safe_print("MT5 Boot Status -> trade_allowed:", getattr(ti, "trade_allowed", None))
+        safe_print(
+            "MT5 Boot Status -> trade_allowed:", getattr(ti, "trade_allowed", None),
+            "| tradeapi_disabled:", getattr(ti, "tradeapi_disabled", None)
+        )
     return True
 
 
@@ -1130,9 +1116,9 @@ def mt5_connect_locked(acc, for_trading=False):
             return False, f"فشل تسجيل الدخول ({err_c}, {err_d})"
 
     ti = mt5.terminal_info()
-    if ti and not getattr(ti, "trade_allowed", False):
+    if ti and (not getattr(ti, "trade_allowed", False) or getattr(ti, "tradeapi_disabled", False)):
         if not send_win32_autotrading_enable():
-            if for_trading and (time.time() - _last_autotrading_fix > 90):
+            if for_trading and (time.time() - _last_autotrading_fix > 60):
                 _last_autotrading_fix = time.time()
                 launch_mt5_with_verified_autotrading(login_str, password, server)
 
@@ -1204,7 +1190,8 @@ def mt5_status(acc):
             return False, 0.0, 0.0, 0, msg
         info, ti = mt5.account_info(), mt5.terminal_info()
         pos = mt5.positions_get() or []
-        algo = "مفعّل 🟢" if (ti and getattr(ti, "trade_allowed", False)) else "قيد التفعيل التلقائي ⚡"
+        allowed = bool(ti and getattr(ti, "trade_allowed", False) and not getattr(ti, "tradeapi_disabled", False))
+        algo = "مفعّل 🟢" if allowed else "جاهز للتفعيل عند الصفقة ⚡"
         return True, float(info.balance), float(info.equity), len(pos), f"متصل بـ MT5 | التداول الآلي: {algo}"
 
 
@@ -1300,8 +1287,15 @@ def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
                 }
                 res = mt5.order_send(req)
 
-                # حل كود 10019 (الهامش غير كافٍ): تقليص اللوت للحد الأدنى وإعادة المحاولة فوراً
-                if res is not None and res.retcode == 10019 and vol > float(si.volume_min or 0.01):
+                # حل كود 10004 و 10020 (Requote / تغير السعر): تحديث السعر الحي وإعادة الإرسال فوراً
+                if res is not None and res.retcode in (10004, 10020):
+                    cur_p2, _ = get_reliable_mt5_price(sym, buy)
+                    if cur_p2 > 0:
+                        req["price"] = cur_p2
+                        res = mt5.order_send(req)
+
+                # حل كود 10019 و 10014 (الهامش غير كافٍ أو اللوت غير صالح): تقليص اللوت للحد الأدنى وإعادة المحاولة
+                if res is not None and res.retcode in (10019, 10014) and vol > float(si.volume_min or 0.01):
                     vol = float(si.volume_min or 0.01)
                     req["volume"] = vol
                     res = mt5.order_send(req)
@@ -1335,7 +1329,6 @@ def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
                         "price": res.price or use_p, "tp": tp, "sl": sl, "verified": True, "note": ""
                     }
                 last = retcode_message(res.retcode, res.comment)
-                # حل كود 10027: إعادة الإقلاع بملف data_path الحقيقي وملف ASCII
                 if res.retcode == 10027 and attempt == 0:
                     launch_mt5_with_verified_autotrading(
                         str(acc.get("login_or_key")),
@@ -1350,13 +1343,53 @@ def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
         return _fail(sym, last or "رفض الوسيط")
 
 
-# ======================= 10. Bybit V5 (مع التبديل التلقائي بين Demo/Live وجسور متعددة) =======================
+# ======================= 10. Bybit V5 (مع البروكسي الأوروبي/الآسيوي التلقائي لتجاوز HTTP 403) =======================
 BYBIT_HOST_LIST = {
     "BYBIT-LIVE": ["https://api.bytick.com", "https://api.bybit.com"],
     "BYBIT-DEMO": ["https://api-demo.bybit.com"],
     "BYBIT-TESTNET": ["https://api-testnet.bybit.com"],
 }
 bybit_time_offset_ms = 0
+_working_eu_proxy = None
+_eu_proxy_checked_at = 0.0
+
+
+def find_working_non_us_proxy():
+    global _working_eu_proxy, _eu_proxy_checked_at
+    if _working_eu_proxy and (time.time() - _eu_proxy_checked_at < 600):
+        return _working_eu_proxy
+
+    _eu_proxy_checked_at = time.time()
+    sources = [
+        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=3000&country=DE,NL,GB,FR,SG,JP,CH,FI&ssl=yes&anonymity=all",
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"
+    ]
+    candidates = []
+    for src in sources:
+        try:
+            st, res = http_request(src, "GET", timeout=6, verify_ssl=False)
+            raw_txt = res.get("_raw_text", "") if isinstance(res, dict) else ""
+            if not raw_txt:
+                with urllib.request.urlopen(src, timeout=6) as r:
+                    raw_txt = r.read().decode("utf-8", errors="ignore")
+            for line in raw_txt.splitlines():
+                line = line.strip()
+                if re.match(r"^\d+\.\d+\.\d+\.\d+:\d+$", line):
+                    candidates.append(f"http://{line}")
+                if len(candidates) >= 25:
+                    break
+        except Exception:
+            continue
+        if len(candidates) >= 15:
+            break
+
+    for p_url in candidates[:18]:
+        st, res = http_request("https://api-demo.bybit.com/v5/market/time", "GET", timeout=4, verify_ssl=False, proxy_addr=p_url)
+        if st == 200 and isinstance(res, dict) and res.get("retCode") == 0:
+            _working_eu_proxy = p_url
+            safe_print("Found working Non-US Bybit Proxy:", p_url)
+            return p_url
+    return None
 
 
 def get_user_bybit_proxy(uid):
@@ -1390,8 +1423,8 @@ def bybit_err(res):
         return "رصيد USDT المتاح في محفظة Unified Trading غير كافٍ لفتح الصفقة"
     if res.get("_status") == 403 or "403" in str(res.get("error", "")):
         return (
-            "HTTP 403 (حجب IP أمريكي). افتح Cloudflare Worker (bybit-bridge.bdh39058.workers.dev) "
-            "وضع الكود المنظف للترويسات واضغط Deploy."
+            "HTTP 403 (حجب IP أمريكي من Bybit). تأكد من الضغط على Deploy في صفحة "
+            "Cloudflare Worker (bybit-bridge.bdh39058.workers.dev) أو شغّل البوت على Render منطقة Frankfurt."
         )
     return f"{res.get('retMsg') or res.get('error') or 'خطأ غير معروف'} (كود {code})"
 
@@ -1411,6 +1444,7 @@ def sync_bybit_time(proxy, host):
 
 
 def _single_bybit_call(acc, mode, method, path, params=None, body=None):
+    global _working_eu_proxy
     hosts = list(BYBIT_HOST_LIST.get(mode, BYBIT_HOST_LIST["BYBIT-DEMO"]))
     proxy = get_user_bybit_proxy(acc.get("user_id"))
     key, secret = acc["login_or_key"], acc["password_or_secret"]
@@ -1436,11 +1470,11 @@ def _single_bybit_call(acc, mode, method, path, params=None, body=None):
         }
         last_res = {"_status": 500, "error": "No host"}
 
-        # 1. المحاولة عبر جسر Cloudflare Worker الخاص بالمستخدم
+        # 1. عبر جسر Cloudflare Worker الخاص بالمستخدم
         if proxy:
             h = dict(base_headers)
             h["X-Target-Host"] = hosts[0]
-            status, res = http_request(proxy + full_path, method, headers=h, raw_body=raw, timeout=12, verify_ssl=False)
+            status, res = http_request(proxy + full_path, method, headers=h, raw_body=raw, timeout=10, verify_ssl=False)
             res["_status"] = status
             if status == 200 and "retCode" in res:
                 if res.get("retCode") == 10002 and attempt == 0:
@@ -1449,20 +1483,27 @@ def _single_bybit_call(acc, mode, method, path, params=None, body=None):
                 return res.get("retCode") == 0, res
             last_res = res
 
-        # 2. المحاولة عبر الجسر السحابي البديل (corsproxy) لتجاوز حجب 403 إن لم يعمل الجسر الأول
-        alt_proxy_url = "https://corsproxy.io/?" + urllib.parse.quote(hosts[0] + full_path, safe="")
-        status_p, res_p = http_request(alt_proxy_url, method, headers=base_headers, raw_body=raw, timeout=12, verify_ssl=False)
-        res_p["_status"] = status_p
-        if status_p == 200 and "retCode" in res_p:
-            return res_p.get("retCode") == 0, res_p
-
-        # 3. المحاولة المباشرة على نطاقات Bybit
+        # 2. الاتصال المباشر بنطاقات Bybit
         for host in hosts:
-            status, res = http_request(host + full_path, method, headers=base_headers, raw_body=raw, timeout=12, verify_ssl=False)
+            status, res = http_request(host + full_path, method, headers=base_headers, raw_body=raw, timeout=10, verify_ssl=False)
             res["_status"] = status
             last_res = res
-            if status != 403:
-                break
+            if status == 200 and "retCode" in res:
+                return res.get("retCode") == 0, res
+
+        # 3. إذا واجهنا حجب 403 الأمريكي، نشغّل محرك البروكسي الأوروبي/الآسيوي التلقائي
+        if last_res.get("_status") == 403 or "403" in str(last_res.get("error", "")):
+            eu_p = find_working_non_us_proxy()
+            if eu_p:
+                status_eu, res_eu = http_request(
+                    hosts[0] + full_path, method, headers=base_headers, raw_body=raw,
+                    timeout=10, verify_ssl=False, proxy_addr=eu_p
+                )
+                res_eu["_status"] = status_eu
+                if status_eu == 200 and "retCode" in res_eu:
+                    return res_eu.get("retCode") == 0, res_eu
+                else:
+                    _working_eu_proxy = None
 
         if last_res.get("retCode") == 10002 and attempt == 0:
             sync_bybit_time(proxy, hosts[0])
@@ -1475,7 +1516,6 @@ def _single_bybit_call(acc, mode, method, path, params=None, body=None):
 def bybit_request(acc, method, path, params=None, body=None):
     mode = acc.get("server_or_mode", "BYBIT-DEMO").upper()
     ok, res = _single_bybit_call(acc, mode, method, path, params, body)
-    # إذا أعاد السيرفر كود 10003 (المفتاح ينتمي لبيئة أخرى مثل BYBIT-LIVE بدلاً من DEMO)، نجرب البيئة الأخرى تلقائياً!
     if not ok and res.get("retCode") == 10003:
         for alt_mode in ("BYBIT-LIVE", "BYBIT-DEMO", "BYBIT-TESTNET"):
             if alt_mode == mode:
@@ -1494,15 +1534,21 @@ def bybit_public(acc, path, params):
     proxy = get_user_bybit_proxy(acc.get("user_id"))
     hosts = ["https://api.bytick.com", "https://api.bybit.com"]
     if proxy:
-        status, res = http_request(f"{proxy}{path}?{qs}", "GET", headers={"X-Target-Host": "https://api.bybit.com"}, timeout=10, verify_ssl=False)
+        status, res = http_request(f"{proxy}{path}?{qs}", "GET", headers={"X-Target-Host": "https://api.bybit.com"}, timeout=8, verify_ssl=False)
         res["_status"] = status
         if status == 200 and res.get("retCode") == 0:
             return True, res
     for host in hosts:
-        status, res = http_request(f"{host}{path}?{qs}", "GET", timeout=10, verify_ssl=False)
+        status, res = http_request(f"{host}{path}?{qs}", "GET", timeout=8, verify_ssl=False)
         res["_status"] = status
-        if status != 403:
-            return res.get("retCode") == 0, res
+        if status == 200 and res.get("retCode") == 0:
+            return True, res
+    eu_p = find_working_non_us_proxy()
+    if eu_p:
+        status, res = http_request(f"https://api.bybit.com{path}?{qs}", "GET", timeout=8, verify_ssl=False, proxy_addr=eu_p)
+        res["_status"] = status
+        if status == 200 and res.get("retCode") == 0:
+            return True, res
     return False, {"_status": 403, "error": "HTTP 403"}
 
 
@@ -1573,6 +1619,12 @@ def bybit_open(acc, action, symbol, lot, tp_usd, sl_usd):
                 "orderType": "Market", "qty": str(qty), "positionIdx": pos_idx
             }
             ok, res = bybit_request(acc, "POST", "/v5/order/create", body=body)
+            # إذا كان الرصيد غير كافٍ للكمية المحددة (110007)، نجرب فوراً بالحد الأدنى 0.01
+            if not ok and res.get("retCode") == 110007 and qty > 0.01:
+                body["qty"] = "0.01"
+                ok, res = bybit_request(acc, "POST", "/v5/order/create", body=body)
+                if ok:
+                    qty = 0.01
             if ok:
                 oid = (res.get("result") or {}).get("orderId", "Executed")
                 return {"ok": True, "symbol": sym, "ticket": str(oid), "volume": qty, "price": 0.0, "tp": 0.0, "sl": 0.0, "verified": True, "note": ""}
@@ -1950,7 +2002,7 @@ def test_new_account(uid, chat_id, pk):
         )
 
 
-# ======================= 14. الاستقبال (Polling) =======================
+# ======================= 14. الاستقبال (Polling) والمراقبة والتشغيل =======================
 HEARTBEAT = {"poll": time.time()}
 POLL_GEN = 0
 
