@@ -56,6 +56,7 @@ jobs:
           METAAPI_TOKEN: ${{ secrets.METAAPI_TOKEN }}
           BYBIT_API_KEY: ${{ secrets.BYBIT_API_KEY }}
           BYBIT_API_SECRET: ${{ secrets.BYBIT_API_SECRET }}
+          BYBIT_PROXY_URL: "https://bybit-bridge.bdh39058.workers.dev"
         run: |
           python -X utf8 main.py
 
@@ -64,11 +65,12 @@ jobs:
         continue-on-error: true
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
+          FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --global user.name "MT5-Cloud-Bot"
           git config --global user.email "bot@users.noreply.github.com"
           git add multi_mt5_gold_bot.db || true
           git diff --staged --quiet || git commit -m "Auto-save bot state [skip ci]" || true
           git push || true
-          gh workflow run mt5_bot.yml || true
+          gh workflow run mt5_bot.yml || GH_TOKEN="$FALLBACK_TOKEN" gh workflow run mt5_bot.yml || true
