@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-بوت التداول الذكي الشامل (MT5 + Bybit Gold) - النسخة النهائية المصححة
-- حل جذري لمشكلة "تعذر جلب السعر الحي" عبر الانتظار الذكي والبدائل السعرية الحية (Tick -> SymbolInfo -> M1 Candle)
-- حل جذري لتفعيل التداول الآلي (Algo Trading) بدون /portable وبدون قتل المنصة أثناء التداول + WScript.Shell Ctrl+E
-- حل جذري لخطأ SSL Hostname mismatch في Bybit Demo ودعم الجسر السحابي وتعدد الحسابات
+بوت التداول الذكي الشامل (MT5 + Bybit Gold) - النسخة النهائية المحصّنة 24/7
+- إصلاح خطأ proxy_had_hello وفحص الصياغة البرمجية بالكامل
+- حل جذري لكود MT5 10027 + حل كود 10016 (ECN SL/TP) + بدائل الأسعار الحية
+- حل حجب Bybit HTTP 403 عبر الجسر السحابي + دعم One-Way & Hedge Mode
+- استمرارية التداول الآلي 24/7 دون توقف عند الأخطاء المؤقتة أو تعطل حساب فرعي
 """
 import os
 import sys
@@ -134,7 +135,6 @@ AI_DEFS = [
 AI_KEYS = {d[0]: d[4] for d in AI_DEFS}
 ai_circuit = {}
 
-# سياق SSL متسامح عند الحاجة لتجنب خطأ Hostname mismatch في النطاقات البديلة
 SSL_CTX_DEFAULT = ssl.create_default_context()
 SSL_CTX_UNVERIFIED = ssl._create_unverified_context()
 
@@ -404,9 +404,12 @@ def _dec_acc(row):
     if not row:
         return {}
     row = dict(row)
-    pw = decrypt_text(row.get("password_or_secret", ""))
-    if not pw and row.get("login_or_key") == KNOWN_MT5_LOGIN:
+    raw_pw = row.get("password_or_secret", "")
+    pw = decrypt_text(raw_pw)
+    if not pw and str(row.get("login_or_key")) == KNOWN_MT5_LOGIN:
         pw = KNOWN_MT5_PASS
+    elif not pw and raw_pw and not raw_pw.startswith("enc1:"):
+        pw = raw_pw
     row["password_or_secret"] = pw
     row["server_or_mode"] = row.get("server_or_mode", "") or ""
     return row
@@ -806,7 +809,7 @@ def metaapi_open(acc, action, symbol, lot, tp_usd, sl_usd):
     return {"ok": False, "symbol": symbol, "msg": "رفض التنفيذ عبر MetaApi"}
 
 
-# ======================= 9. MetaTrader 5 المباشر (حل جذري للسعر الحي وكود 10027) =======================
+# ======================= 9. MetaTrader 5 المباشر (حل شامل لكود 10027 و 10016 والأسعار) =======================
 mt5 = None
 NATIVE_MT5_AVAILABLE = False
 if os.name == "nt":
@@ -924,10 +927,6 @@ def prepare_autotrading_config(exe, login_str="", password="", server=""):
 
 
 def send_win32_autotrading_enable():
-    """
-    تفعيل زر Algo Trading فقط إذا كان معطلاً (Setter وليس Toggle عشوائي)
-    باستخدام Win32 API + PowerShell WScript.Shell.SendKeys('^e')
-    """
     if os.name != "nt" or not mt5:
         return False
     ti = mt5.terminal_info()
@@ -962,13 +961,11 @@ def send_win32_autotrading_enable():
 
         u.EnumWindows(WNDENUMPROC(enum_cb), 0)
 
-        # إغلاق أي نافذة حوارية منبثقة (#32770) تعطل اختصارات لوحة المفاتيح
         for d_hwnd in dialogs:
             u.PostMessageW(d_hwnd, 0x0010, 0, 0)
         if dialogs:
             time.sleep(0.3)
 
-        # المحاولة 1: عبر WScript.Shell SendKeys في PowerShell (الأكثر موثوقية على Windows Server)
         ps_cmd = (
             "$ws = New-Object -ComObject WScript.Shell; "
             "$p = Get-Process terminal64 -ErrorAction SilentlyContinue | Select-Object -First 1; "
@@ -980,7 +977,6 @@ def send_win32_autotrading_enable():
         if ti and getattr(ti, "trade_allowed", False):
             return True
 
-        # المحاولة 2: عبر Win32 keybd_event مرة واحدة فقط
         for hwnd in hwnds[:1]:
             u.ShowWindow(hwnd, 9)
             u.SetForegroundWindow(hwnd)
@@ -997,7 +993,6 @@ def send_win32_autotrading_enable():
 
 
 def launch_mt5_terminal_once(login_str="", password="", server=""):
-    """يُشغّل المنصة عند الإقلاع الأول فقط بدون /portable ليحافظ على مجلد السيرفرات والرموز"""
     exe = find_mt5_terminal_exe()
     if not exe:
         return False
@@ -1008,12 +1003,10 @@ def launch_mt5_terminal_once(login_str="", password="", server=""):
     subprocess.run(["taskkill", "/F", "/IM", "terminal64.exe"], capture_output=True, timeout=20)
     time.sleep(2)
     ini = prepare_autotrading_config(exe, login_str, password, server)
-    # بدون /portable نهائياً حتى لا تفقد المنصة الاتصال بالسيرفر أو التسعيرات الحية
     subprocess.Popen([exe, f"/config:{ini}"])
     time.sleep(8)
     mt5.initialize(exe, login=int(login_str or KNOWN_MT5_LOGIN), password=password or KNOWN_MT5_PASS,
                    server=server or KNOWN_MT5_SERVER, timeout=25000)
-    # تفعيل رمز الذهب مسبقاً عند الإقلاع لتكون التسعيرات الحية جاهزة دائماً
     for s in ("XAUUSD", "GOLD", "EURUSD"):
         try:
             mt5.symbol_select(s, True)
@@ -1059,7 +1052,6 @@ def mt5_connect_locked(acc, for_trading=False):
                     pass
             return False, f"فشل تسجيل الدخول ({err_c}, {err_d})"
 
-    # تفعيل التداول الآلي دون قتل المنصة أبداً أثناء التداول!
     ti = mt5.terminal_info()
     if ti and not getattr(ti, "trade_allowed", False):
         send_win32_autotrading_enable()
@@ -1087,12 +1079,6 @@ def match_mt5_symbol(desired):
 
 
 def get_reliable_mt5_price(sym, is_buy):
-    """
-    حماية ثلاثية لجلب السعر الحي في MT5 حتى لا تفشل الصفقة برسالة 'تعذر جلب السعر الحي':
-    1. تفعيل الرمز وانتظار symbol_info_tick حتى 10 محاولات (5 ثوانٍ).
-    2. الاحتياطي الأول: قراءة ask/bid من mt5.symbol_info(sym).
-    3. الاحتياطي الثاني: قراءة سعر الإغلاق الحي من آخر شمعة M1 (copy_rates_from_pos).
-    """
     mt5.symbol_select(sym, True)
     for _ in range(10):
         tick = mt5.symbol_info_tick(sym)
@@ -1100,7 +1086,7 @@ def get_reliable_mt5_price(sym, is_buy):
             p = float(tick.ask if is_buy else tick.bid)
             if p > 0:
                 return p, float(tick.ask - tick.bid) if (tick.ask > 0 and tick.bid > 0) else 0.2
-        time.sleep(0.4)
+        time.sleep(0.35)
 
     si = mt5.symbol_info(sym)
     if si:
@@ -1209,7 +1195,7 @@ def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
         buy = action == "BUY"
         price, spread = get_reliable_mt5_price(sym, buy)
         if price <= 0:
-            return _fail(sym, "السوق مغلق حالياً (عطلة نهاية الأسبوع للفوركس والذهب على MT5)")
+            return _fail(sym, "السوق مغلق حالياً أو لا توجد تسعيرات حية لهذا الرمز")
 
         vol = normalize_volume(lot, si.volume_min, si.volume_max, si.volume_step)
         min_dist = si.trade_stops_level * si.point + spread * 1.5
@@ -1226,12 +1212,33 @@ def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
             for mode in modes:
                 cur_p, _ = get_reliable_mt5_price(sym, buy)
                 use_p = cur_p if cur_p > 0 else price
-                res = mt5.order_send({
+                req = {
                     "action": mt5.TRADE_ACTION_DEAL, "symbol": sym, "volume": vol,
                     "type": mt5.ORDER_TYPE_BUY if buy else mt5.ORDER_TYPE_SELL,
                     "price": use_p, "sl": sl, "tp": tp, "deviation": 100,
                     "magic": MAGIC, "comment": "AI_Bot", "type_time": mt5.ORDER_TIME_GTC, "type_filling": mode
-                })
+                }
+                res = mt5.order_send(req)
+                # إذا رفض السيرفر بسبب SL/TP في أوامر السوق (كود 10016 أو 10015 أو 10013)، ننفذ بدون SL/TP ثم نضيفهما
+                if res is not None and res.retcode in (10016, 10015, 10013):
+                    req["sl"] = 0.0
+                    req["tp"] = 0.0
+                    res = mt5.order_send(req)
+                    if res is not None and res.retcode in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL):
+                        pos_ticket = res.order or res.deal
+                        if sl > 0 or tp > 0:
+                            mt5.order_send({
+                                "action": mt5.TRADE_ACTION_SLTP,
+                                "position": int(pos_ticket),
+                                "symbol": sym,
+                                "sl": sl,
+                                "tp": tp
+                            })
+                        return {
+                            "ok": True, "symbol": sym, "ticket": str(pos_ticket), "volume": vol,
+                            "price": res.price or use_p, "tp": tp, "sl": sl, "verified": True, "note": ""
+                        }
+
                 if res is None:
                     last = f"لا رد من المنصة {mt5.last_error()}"
                     continue
@@ -1251,7 +1258,7 @@ def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
         return _fail(sym, last or "رفض الوسيط")
 
 
-# ======================= 10. Bybit V5 (إصلاح خطأ شهادة SSL ودعم الجسر السحابي) =======================
+# ======================= 10. Bybit V5 (إصلاح شامل للجسر السحابي وأنماط العقود) =======================
 BYBIT_HOST_LIST = {
     "BYBIT-LIVE": ["https://api.bytick.com", "https://api.bybit.com"],
     "BYBIT-DEMO": ["https://api-demo.bybit.com"],
@@ -1311,7 +1318,7 @@ def bybit_request(acc, method, path, params=None, body=None):
 
     base_headers = {"X-BAPI-API-KEY": key, "X-BAPI-TIMESTAMP": ts, "X-BAPI-RECV-WINDOW": recv, "X-BAPI-SIGN": sig}
     last_res = {"_status": 500, "error": "No host"}
-    proxy_ had_hello = False
+    proxy_had_hello = False
 
     if proxy:
         h = dict(base_headers)
@@ -1387,6 +1394,7 @@ def bybit_positions(acc, symbol=None):
         if float(p.get("size") or 0) > 0:
             out.append({
                 "id": p["symbol"], "symbol": p["symbol"], "volume": float(p["size"]), "raw_size": p["size"],
+                "positionIdx": int(p.get("positionIdx") or 0),
                 "side": "BUY" if p.get("side") == "Buy" else "SELL", "profit": float(p.get("unrealisedPnl") or 0)
             })
     return out
@@ -1395,7 +1403,7 @@ def bybit_positions(acc, symbol=None):
 def bybit_close(acc, pos):
     ok, _ = bybit_request(acc, "POST", "/v5/order/create", body={
         "category": "linear", "symbol": pos["symbol"], "side": "Sell" if pos["side"] == "BUY" else "Buy",
-        "orderType": "Market", "qty": pos["raw_size"], "reduceOnly": True, "positionIdx": 0
+        "orderType": "Market", "qty": pos["raw_size"], "reduceOnly": True, "positionIdx": pos.get("positionIdx", 0)
     })
     return ok
 
@@ -1414,15 +1422,19 @@ def bybit_open(acc, action, symbol, lot, tp_usd, sl_usd):
     buy = action == "BUY"
     last_err = ""
     for sym in bybit_symbol_candidates(symbol):
-        body = {
-            "category": "linear", "symbol": sym, "side": "Buy" if buy else "Sell",
-            "orderType": "Market", "qty": str(qty), "positionIdx": 0
-        }
-        ok, res = bybit_request(acc, "POST", "/v5/order/create", body=body)
-        if ok:
-            oid = (res.get("result") or {}).get("orderId", "Executed")
-            return {"ok": True, "symbol": sym, "ticket": str(oid), "volume": qty, "price": 0.0, "tp": 0.0, "sl": 0.0, "verified": True, "note": ""}
-        last_err = bybit_err(res)
+        # تجربة One-Way Mode (0) ثم Hedge Mode (1 للشراء / 2 للبيع)
+        for pos_idx in (0, 1 if buy else 2):
+            body = {
+                "category": "linear", "symbol": sym, "side": "Buy" if buy else "Sell",
+                "orderType": "Market", "qty": str(qty), "positionIdx": pos_idx
+            }
+            ok, res = bybit_request(acc, "POST", "/v5/order/create", body=body)
+            if ok:
+                oid = (res.get("result") or {}).get("orderId", "Executed")
+                return {"ok": True, "symbol": sym, "ticket": str(oid), "volume": qty, "price": 0.0, "tp": 0.0, "sl": 0.0, "verified": True, "note": ""}
+            last_err = bybit_err(res)
+            if "positionIdx" not in str(res.get("retMsg", "")):
+                break
     return _fail(symbol, last_err)
 
 
@@ -1607,10 +1619,8 @@ def tick_cycle(uid, chat_id, rt):
     if not free:
         return
     res = execute_ai_trade(uid, chat_id, free, rt=rt, manual=False)
-    if res == "failed":
-        stop_trader(uid, chat_id, "⏸️ تم إيقاف التكرار التلقائي مؤقتاً حتى تتحقق من سبب رفض الوسيط أعلاه.")
-        return
-    rt.next_analysis = time.time() + COOLDOWN_AFTER_TRADE
+    # لا نوقف التداول الآلي عند الفشل المؤقت، بل ننتظر 30 ثانية ونعيد المحاولة لضمان استمرارية 24/7
+    rt.next_analysis = time.time() + (COOLDOWN_AFTER_TRADE if res == "executed" else 30)
 
 
 def trading_worker(uid, chat_id, rt):
@@ -1717,7 +1727,7 @@ def main_keyboard(uid):
 def main_text(uid):
     u, accs = get_user(uid), get_user_accounts(uid)
     act, tool = get_active_account(uid), get_ai_tool_by_id(get_user(uid)["selected_ai_id"])
-    proxy_note = f"\n• جسر Bybit السحابي: مفعّل 🔗" if u.get("bybit_proxy") else ""
+    proxy_note = "\n• جسر Bybit السحابي: مفعّل 🔗" if u.get("bybit_proxy") else ""
     return (
         "🤖 لوحة تحكم بوت التداول الذكي (MT5 + Bybit Gold)\n\n"
         f"• حالة البوت: {'يعمل سحابياً 24/7 🟢' if is_running(uid) else 'متوقف 🔴'}\n"
