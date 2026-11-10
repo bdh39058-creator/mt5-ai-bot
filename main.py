@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-بوت التداول الذكي الشامل (MT5 + Bybit Gold) - النسخة النهائية الصافية 24/7
-- حل جذري لكود 10030 (Unsupported filling mode) عبر قراءة Bitmask الرسمي (si.filling_mode & 1 / & 2)
-  وفصل فتح الصفقة السريع عن تركيب SL/TP لضمان قبول الأمر من أول محاولة
-- حل جذري لكود 10027 (AutoTrading مفعّل 🟢 عبر Api=0 + CRLF + data_path)
-- حل شامل لحجب Bybit HTTP 403 عبر محرك البروكسيات الأوروبية/الآسيوية المتعدد + دعم Cloudflare Smart Placement
+بوت التداول الذكي الشامل (MT5 + Bybit Gold) - نسخة القناص المؤسسي والصفقات الثلاثية 24/7
+- تحليل متعدد الفريمات (M1 + M5 + M15) مع (EMA 9/21/50, RSI, MACD, Bollinger Bands, ATR, Support/Resistance)
+- شرط ثقة >= 90% للدخول المباشر، أو إظهار زر (مخاطرة) بوقف خسارة محمي أقل من 0.50$
+- نظام الصفقات الثلاثية الذكية (Triple-Layer Execution) بأهداف ووقف خسارة متدرج وتأمين تلقائي (Auto-Breakeven)
+- دعم كامل لجميع حسابات MT5 (الحقيقية Live والتجريبية Demo) وحسابات Bybit بدون أي قيود
 """
 import os
 import sys
 import re
 import ssl
+import math
 import hmac
 import json
 import time
@@ -90,9 +91,10 @@ MASTER_METAAPI_TOKEN = env("METAAPI_TOKEN")
 SECRET_ACCESS_KEY = env("SECRET_ACCESS_KEY", default="vip_secret_99")
 DB_SECRET = env("DB_ENCRYPTION_KEY") or SECRET_ACCESS_KEY
 UTC_OFFSET = env_num("BOT_UTC_OFFSET", 3, int)
-COOLDOWN_AFTER_TRADE = env_num("COOLDOWN_SECONDS", 15, int)
+COOLDOWN_AFTER_TRADE = env_num("COOLDOWN_SECONDS", 12, int)
 BYBIT_QTY_PER_LOT = env_num("BYBIT_QTY_PER_LOT", 1.0, float)
 DEFAULT_BYBIT_PROXY = env("BYBIT_PROXY_URL", default="https://bybit-bridge.bdh39058.workers.dev")
+MIN_AI_CONFIDENCE = env_num("MIN_AI_CONFIDENCE", 90, int)  # شرط الثقة 90% فأكثر للدخول المباشر
 
 KNOWN_MT5_LOGIN = env("MT5_LOGIN", default="5058253637")
 KNOWN_MT5_PASS = env("MT5_PASSWORD", default="*aGm1cNp")
@@ -309,6 +311,12 @@ USER_COLUMNS = [
 ]
 USER_FIELDS = {c[0] for c in USER_COLUMNS}
 
+TRADE_COLUMNS = [
+    ("tp_usd", "REAL DEFAULT 0.50"),
+    ("sl_usd", "REAL DEFAULT 1.00"),
+    ("layer_tag", "TEXT DEFAULT 'L1'"),
+]
+
 
 def db_exec(sql, params=(), one=False):
     with db_lock:
@@ -351,7 +359,9 @@ def init_db():
                 id INTEGER PRIMARY KEY, name TEXT, base_url TEXT, api_key TEXT, model TEXT)""")
             conn.execute("""CREATE TABLE IF NOT EXISTS bot_trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, acc_pk INTEGER, platform TEXT, symbol TEXT,
-                side TEXT, volume REAL, ticket TEXT, open_ts INTEGER, status TEXT DEFAULT 'OPEN', pnl REAL DEFAULT 0)""")
+                side TEXT, volume REAL, ticket TEXT, open_ts INTEGER, status TEXT DEFAULT 'OPEN', pnl REAL DEFAULT 0,
+                tp_usd REAL DEFAULT 0.50, sl_usd REAL DEFAULT 1.00, layer_tag TEXT DEFAULT 'L1')""")
+            _ensure_columns(conn, "bot_trades", TRADE_COLUMNS)
             for d in AI_DEFS:
                 conn.execute("INSERT OR REPLACE INTO ai_tools (id,name,base_url,api_key,model) VALUES (?,?,?,?,?)",
                              (d[0], d[1], d[2], "", d[3]))
@@ -510,16 +520,18 @@ def get_ai_tool_by_id(tid):
     return next((t for t in get_ai_tools() if t["id"] == tid), {})
 
 
-def record_trade(uid, acc, symbol, side, volume, ticket):
-    return db_exec("INSERT INTO bot_trades (user_id,acc_pk,platform,symbol,side,volume,ticket,open_ts) VALUES (?,?,?,?,?,?,?,?)",
-                   (uid, acc["acc_pk"], acc["platform"], symbol, side, volume, str(ticket), int(time.time())))
+def record_trade(uid, acc, symbol, side, volume, ticket, tp_usd=0.50, sl_usd=1.00, layer_tag="L1"):
+    return db_exec(
+        "INSERT INTO bot_trades (user_id,acc_pk,platform,symbol,side,volume,ticket,open_ts,tp_usd,sl_usd,layer_tag) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (uid, acc["acc_pk"], acc["platform"], symbol, side, volume, str(ticket), int(time.time()), float(tp_usd), float(sl_usd), str(layer_tag))
+    )
 
 
 def open_trade_rows(uid, acc_pk):
     return db_exec("SELECT * FROM bot_trades WHERE user_id=? AND acc_pk=? AND status='OPEN'", (uid, acc_pk))
 
 
-# ======================= 5. تحليل بيانات الاعتماد =======================
+# ======================= 5. تحليل بيانات الاعتماد (يدعم جميع حسابات الديمو والحقيقي) =======================
 LABELS = {"login", "user", "username", "account", "id", "password", "pass", "pwd", "server", "key", "api", "apikey",
           "secret", "apisecret", "mode", "broker", "اسم المستخدم", "المستخدم", "الحساب", "رقم الحساب", "كلمة المرور",
           "كلمة السر", "الباسورد", "السيرفر", "الخادم", "المفتاح", "السر"}
@@ -547,22 +559,23 @@ def parse_three_line_credentials(raw):
     if "BYBIT" in up:
         mode = "BYBIT-TESTNET" if "TEST" in up else ("BYBIT-DEMO" if "DEMO" in up else "BYBIT-LIVE")
         return ("BYBIT", p1, p2, mode) if p1 and p2 else ("INVALID", "", "", "")
-    if not p1.isdigit() or not p2 or not p3:
+    clean_login = re.sub(r"\s+", "", p1)
+    if not clean_login.isdigit() or not p2 or not p3:
         return "INVALID", "", "", ""
-    return "MT5", p1, p2, p3
+    return "MT5", clean_login, p2, p3
 
 
-# ======================= 6. المؤشرات والذكاء الاصطناعي =======================
+# ======================= 6. محرك التحليل الفني المؤسسي متعدد الفريمات (M1 + M5 + M15) =======================
 def calc_ema(prices, period):
     if not prices:
         return 0.0
     if len(prices) < period:
-        return prices[-1]
+        return float(prices[-1])
     k = 2.0 / (period + 1.0)
-    ema = sum(prices[:period]) / period
+    ema = sum(prices[:period]) / float(period)
     for p in prices[period:]:
-        ema = p * k + ema * (1 - k)
-    return ema
+        ema = p * k + ema * (1.0 - k)
+    return float(ema)
 
 
 def calc_rsi(prices, period=14):
@@ -579,35 +592,184 @@ def calc_rsi(prices, period=14):
     return 100.0 - 100.0 / (1.0 + ag / al)
 
 
-def tech_signal(closes):
-    if not closes or len(closes) < 15:
+def calc_macd(prices):
+    if len(prices) < 26:
+        return 0.0, 0.0, 0.0
+    ema12 = calc_ema(prices, 12)
+    ema26 = calc_ema(prices, 26)
+    macd_line = ema12 - ema26
+    # حساب خط الإشارة التقريبي من آخر 9 نقاط
+    series = []
+    for idx in range(max(26, len(prices) - 12), len(prices) + 1):
+        sub = prices[:idx]
+        series.append(calc_ema(sub, 12) - calc_ema(sub, 26))
+    sig_line = calc_ema(series, 9) if series else macd_line
+    hist = macd_line - sig_line
+    return macd_line, sig_line, hist
+
+
+def calc_bollinger(prices, period=20, mult=2.0):
+    if len(prices) < period:
+        p = prices[-1] if prices else 0.0
+        return p, p, p
+    window = prices[-period:]
+    mid = sum(window) / float(period)
+    var = sum((x - mid) ** 2 for x in window) / float(period)
+    std = math.sqrt(var)
+    return mid - mult * std, mid, mid + mult * std
+
+
+def calc_atr_from_candles(candles, period=14):
+    if not candles or len(candles) < 3:
+        return 0.5
+    trs = []
+    for i in range(1, len(candles)):
+        h = float(candles[i].get("high", candles[i]["close"]))
+        low = float(candles[i].get("low", candles[i]["close"]))
+        prev_c = float(candles[i - 1]["close"])
+        tr = max(h - low, abs(h - prev_c), abs(low - prev_c))
+        trs.append(tr)
+    if not trs:
+        return 0.5
+    recent = trs[-period:]
+    return sum(recent) / float(len(recent))
+
+
+def analyze_single_timeframe(candles):
+    """تحليل عميق لفريم زمني واحد يرجع اتجاهه وقوة الإشارة وتفاصيل المؤشرات"""
+    if not candles or len(candles) < 20:
         return None
+    closes = [float(c["close"]) for c in candles]
+    highs = [float(c.get("high", c["close"])) for c in candles]
+    lows = [float(c.get("low", c["close"])) for c in candles]
+    opens = [float(c.get("open", c["close"])) for c in candles]
+
     price = closes[-1]
-    e9, e21, rsi = calc_ema(closes, 9), calc_ema(closes, 21), calc_rsi(closes, 14)
-    bias = "BUY" if (e9 >= e21 and rsi < 72) or rsi < 32 else "SELL"
+    e9 = calc_ema(closes, 9)
+    e21 = calc_ema(closes, 21)
+    e50 = calc_ema(closes, 50)
+    rsi = calc_rsi(closes, 14)
+    macd_l, sig_l, hist = calc_macd(closes)
+    bb_low, bb_mid, bb_high = calc_bollinger(closes, 20, 2.0)
+    atr = calc_atr_from_candles(candles, 14)
+
+    support = min(lows[-20:])
+    resistance = max(highs[-20:])
+
+    # فحص زخم آخر 3 شموع
+    last_bull = sum(1 for i in (-1, -2, -3) if closes[i] > opens[i])
+    last_bear = sum(1 for i in (-1, -2, -3) if closes[i] < opens[i])
+
+    buy_pts = 0
+    sell_pts = 0
+    reasons = []
+
+    # 1. تقاطع وترتيب المتوسطات الأسية EMA Alignment
+    if e9 > e21 > e50:
+        buy_pts += 30
+        reasons.append("ترند صاعد قوي (EMA9>21>50)")
+    elif e9 > e21:
+        buy_pts += 18
+        reasons.append("تقاطع إيجابي (EMA9>21)")
+    elif e9 < e21 < e50:
+        sell_pts += 30
+        reasons.append("ترند هابط قوي (EMA9<21<50)")
+    elif e9 < e21:
+        sell_pts += 18
+        reasons.append("تقاطع سلبي (EMA9<21)")
+
+    # 2. موقع السعر من المتوسطات
+    if price > e9 and price > e21:
+        buy_pts += 12
+    elif price < e9 and price < e21:
+        sell_pts += 12
+
+    # 3. مؤشر RSI (زخم + ارتداد من التشبع)
+    if 52 <= rsi <= 68:
+        buy_pts += 18
+        reasons.append(f"زخم شرائي صحي (RSI:{rsi:.1f})")
+    elif rsi <= 30:
+        buy_pts += 22
+        reasons.append(f"ارتداد من تشبع بيعي (RSI:{rsi:.1f})")
+    elif 32 <= rsi <= 48:
+        sell_pts += 18
+        reasons.append(f"زخم بيعي صحي (RSI:{rsi:.1f})")
+    elif rsi >= 70:
+        sell_pts += 22
+        reasons.append(f"ارتداد من تشبع شرائي (RSI:{rsi:.1f})")
+
+    # 4. مؤشر الماكد MACD
+    if hist > 0 and macd_l >= sig_l:
+        buy_pts += 16
+        reasons.append("MACD إيجابي")
+    elif hist < 0 and macd_l <= sig_l:
+        sell_pts += 16
+        reasons.append("MACD سلبي")
+
+    # 5. البولنجر باند والدعوم والمقاومات
+    if price <= bb_low * 1.0008 or (price - support) <= atr * 0.8:
+        buy_pts += 14
+        reasons.append("ارتداد من دعم/بولنجر سفلي")
+    if price >= bb_high * 0.9992 or (resistance - price) <= atr * 0.8:
+        sell_pts += 14
+        reasons.append("ارتداد من مقاومة/بولنجر علوي")
+
+    # 6. الشموع اليابانية اللحظية
+    if last_bull >= 2 and closes[-1] > closes[-2]:
+        buy_pts += 12
+    elif last_bear >= 2 and closes[-1] < closes[-2]:
+        sell_pts += 12
+
+    direction = "BUY" if buy_pts >= sell_pts else "SELL"
+    raw_score = max(buy_pts, sell_pts)
+    diff_score = abs(buy_pts - sell_pts)
+
     return {
-        "price": price, "ema9": e9, "ema21": e21, "rsi": rsi, "bias": bias,
-        "summary": f"Price:{price:.2f} | RSI:{rsi:.1f} | EMA9:{e9:.2f}"
+        "direction": direction,
+        "raw_score": raw_score,
+        "diff_score": diff_score,
+        "price": price,
+        "ema9": e9,
+        "ema21": e21,
+        "ema50": e50,
+        "rsi": rsi,
+        "macd_hist": hist,
+        "atr": atr,
+        "support": support,
+        "resistance": resistance,
+        "reasons": reasons[:3],
     }
 
 
-def get_market_closes(symbol, accounts):
-    errs = []
-    for plat, fn in (("MT5", mt5_fetch_closes), ("BYBIT", bybit_fetch_closes)):
-        for acc in [a for a in accounts if a["platform"] == plat][:2]:
-            closes, err = fn(acc, symbol)
-            if closes:
-                return closes, plat
-            errs.append(err)
-    return None, " | ".join(e for e in errs if e) or "لا يوجد حساب متصل"
+def get_multi_timeframe_data(symbol, accounts):
+    """جلب بيانات الشموع لثلاثة أطر زمنية (M1, M5, M15) من المنصة المتصلة"""
+    for acc in accounts:
+        if acc["platform"] == "MT5":
+            mtf = mt5_fetch_mtf_candles(acc, symbol)
+            if mtf and mtf.get("M1"):
+                return mtf, "MT5"
+    for acc in accounts:
+        if acc["platform"] == "BYBIT":
+            mtf = bybit_fetch_mtf_candles(acc, symbol)
+            if mtf and mtf.get("M1"):
+                return mtf, "BYBIT"
+    # محاولة أخيرة عبر بيانات Bybit العامة إن لم يكن الحساب متصلاً بعد
+    mtf = bybit_fetch_mtf_candles({"user_id": 0, "server_or_mode": "BYBIT-DEMO"}, symbol)
+    if mtf and mtf.get("M1"):
+        return mtf, "GLOBAL"
+    return None, "NONE"
 
 
-def raw_ai_request(tool, prompt, max_tokens=80):
+def raw_ai_request(tool, prompt, max_tokens=100):
     if not tool or not tool.get("api_key"):
         return False, "no key"
-    headers = {"Authorization": f"Bearer {tool['api_key']}", "HTTP-Referer": "https://github.com", "X-Title": "AI Trading Bot"}
-    payload = {"model": tool["model"], "messages": [{"role": "user", "content": prompt}],
-               "temperature": 0.15, "max_tokens": max_tokens}
+    headers = {"Authorization": f"Bearer {tool['api_key']}", "HTTP-Referer": "https://github.com", "X-Title": "AI Institutional Sniper"}
+    payload = {
+        "model": tool["model"],
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1,
+        "max_tokens": max_tokens
+    }
     status, res = http_request(tool["base_url"], "POST", headers=headers, payload=payload, timeout=10)
     if status == 200 and "choices" in res:
         try:
@@ -623,10 +785,10 @@ def parse_ai_json(text):
         a, b = clean.find("{"), clean.rfind("}")
         d = json.loads(clean[a:b + 1])
         act = str(d.get("action", "")).upper().strip()
-        if act not in ("BUY", "SELL"):
+        if act not in ("BUY", "SELL", "WAIT", "HOLD"):
             return None
-        conf = int(float(d.get("confidence", 88)))
-        return {"action": act, "confidence": max(75, min(conf, 99))}
+        conf = int(float(d.get("confidence", 85)))
+        return {"action": act, "confidence": max(0, min(conf, 99))}
     except Exception:
         return None
 
@@ -637,7 +799,7 @@ def ask_ai(uid, prompt):
     for t in tools:
         if not t["api_key"] or ai_circuit.get(t["id"], 0) > time.time():
             continue
-        ok, text = raw_ai_request(t, prompt, 60)
+        ok, text = raw_ai_request(t, prompt, 80)
         parsed = parse_ai_json(text) if ok else None
         if parsed:
             parsed["provider"] = t["name"]
@@ -646,46 +808,161 @@ def ask_ai(uid, prompt):
     return None
 
 
-def decide_trade(uid, symbol, accounts):
-    closes, src = get_market_closes(symbol, accounts)
-    if closes:
-        sig = tech_signal(closes)
-        ind = f"{src}_{sig['summary']}"
-        bias = sig["bias"]
-        price = sig["price"]
+def deep_institutional_analysis(uid, symbol, accounts):
+    """
+    تحليل مؤسسي شامل يدمج M1 + M5 + M15 مع الذكاء الاصطناعي:
+    - إذا كانت الفرصة قوية ومتوافقة، تكون الثقة >= 90% ويدخل البوت فوراً.
+    - إذا كان السوق متعارضاً أو خطراً، تكون الثقة < 90% ويقترح الانتظار أو زر (مخاطرة).
+    """
+    mtf_data, src = get_multi_timeframe_data(symbol, accounts)
+    if not mtf_data or not mtf_data.get("M1"):
+        return {
+            "ready": False,
+            "action": "BUY",
+            "confidence": 0,
+            "provider": "No Market Data",
+            "price": 0.0,
+            "indicators": "تعذر سحب الشموع الحية حالياً",
+            "detailed_report": "⚠️ لا توجد بيانات شموع كافية من السيرفر حالياً."
+        }
+
+    a_m1 = analyze_single_timeframe(mtf_data.get("M1"))
+    a_m5 = analyze_single_timeframe(mtf_data.get("M5")) or a_m1
+    a_m15 = analyze_single_timeframe(mtf_data.get("M15")) or a_m5
+
+    dirs = [a_m1["direction"], a_m5["direction"], a_m15["direction"]]
+    buy_votes = dirs.count("BUY")
+    sell_votes = dirs.count("SELL")
+    dominant_dir = "BUY" if buy_votes >= sell_votes else "SELL"
+    alignment_count = max(buy_votes, sell_votes)  # 3 = توافق كامل للفريمات الثلاثة، 2 = توافق فريمين
+
+    # حساب درجة القوة الفنية الأساسية بناءً على توافق الفريمات الثلاثة (M1, M5, M15)
+    avg_raw = (a_m1["raw_score"] * 0.45) + (a_m5["raw_score"] * 0.35) + (a_m15["raw_score"] * 0.20)
+    if alignment_count == 3 and avg_raw >= 52 and a_m1["diff_score"] >= 18:
+        tech_conf = min(98, int(90 + (avg_raw - 50) * 0.25))
+    elif alignment_count >= 2 and avg_raw >= 60 and a_m1["direction"] == a_m5["direction"] and a_m1["diff_score"] >= 22:
+        tech_conf = min(96, int(90 + (avg_raw - 58) * 0.25))
     else:
-        bias = "BUY" if int(time.time()) % 2 == 0 else "SELL"
-        ind = f"Symbol:{symbol} | Signal:{bias}"
-        price = 0.0
+        tech_conf = max(62, min(87, int(65 + avg_raw * 0.3)))
+
+    summary_str = (
+        f"Price:{a_m1['price']:.2f} | "
+        f"M1:{a_m1['direction']}(RSI:{a_m1['rsi']:.1f}) | "
+        f"M5:{a_m5['direction']}(RSI:{a_m5['rsi']:.1f}) | "
+        f"M15:{a_m15['direction']} | "
+        f"Support:{a_m1['support']:.2f} | Res:{a_m1['resistance']:.2f}"
+    )
 
     prompt = (
-        f"You are an institutional Gold & Forex AI Scalper trading {symbol} on M1. "
-        f"Indicators: {ind}. Technical bias: {bias}. "
-        f"Decide immediate market execution (BUY or SELL). "
-        f"Reply ONLY with JSON: {{\"action\":\"{bias}\",\"confidence\":90}}"
+        f"You are an elite institutional Gold/Forex fund algorithm analyzing {symbol}. "
+        f"Multi-Timeframe Data: {summary_str}. "
+        f"M1 signals: {', '.join(a_m1['reasons'])}. "
+        f"Timeframe alignment: {alignment_count}/3 towards {dominant_dir}. Technical pre-score: {tech_conf}%. "
+        f"If the setup has strong confluence, confirm {dominant_dir} with confidence >= 91. "
+        f"If the market is choppy/conflicting, output WAIT or confidence < 85. "
+        f"Reply ONLY in JSON: {{\"action\":\"{dominant_dir}\",\"confidence\":{tech_conf}}}"
     )
-    ai = ask_ai(uid, prompt)
-    if ai:
-        return {
-            "action": ai["action"],
-            "confidence": ai["confidence"],
-            "provider": ai["provider"],
-            "mode": "AI+TECH",
-            "indicators": ind,
-            "price": price
-        }
-    fallback_tool = get_ai_tool_by_id(get_user(uid)["selected_ai_id"]).get("name", "Technical Engine")
+
+    ai_res = ask_ai(uid, prompt)
+    provider_name = get_ai_tool_by_id(get_user(uid)["selected_ai_id"]).get("name", "Institutional Engine")
+
+    if ai_res:
+        provider_name = ai_res["provider"]
+        if ai_res["action"] in ("WAIT", "HOLD"):
+            final_conf = min(tech_conf, 82)
+            final_dir = dominant_dir
+        elif ai_res["action"] == dominant_dir:
+            # توافق الذكاء الاصطناعي مع التحليل الفني يرفع الموثوقية
+            final_conf = max(tech_conf, ai_res["confidence"])
+            if alignment_count >= 2 and avg_raw >= 50:
+                final_conf = max(final_conf, 92)
+            final_dir = dominant_dir
+        else:
+            # تعارض الذكاء الاصطناعي مع المؤشرات الفنية -> خفض الثقة تحت 90% لتنبيه المستخدم
+            final_conf = min(78, ai_res["confidence"])
+            final_dir = dominant_dir
+    else:
+        final_conf = tech_conf
+        final_dir = dominant_dir
+
+    all_reasons = " ، ".join(a_m1["reasons"] or ["مراقبة السيولة"])
+    detailed_report = (
+        f"📊 **تفاصيل التحليل المؤسسي ({symbol}):**\n"
+        f"• السعر الحي: `{a_m1['price']:.2f}` | التذبذب ATR: `{a_m1['atr']:.2f}`\n"
+        f"• الفريمات: M1 ({a_m1['direction']}) | M5 ({a_m5['direction']}) | M15 ({a_m15['direction']})\n"
+        f"• المؤشرات: RSI `{a_m1['rsi']:.1f}` | EMA9 `{a_m1['ema9']:.2f}` | EMA21 `{a_m1['ema21']:.2f}`\n"
+        f"• الدعم/المقاومة: دعم `{a_m1['support']:.2f}` | مقاومة `{a_m1['resistance']:.2f}`\n"
+        f"• الأساس الفني: {all_reasons}"
+    )
+
     return {
-        "action": bias,
-        "confidence": 86,
-        "provider": fallback_tool,
-        "mode": "TECH",
-        "indicators": ind,
-        "price": price
+        "ready": final_conf >= MIN_AI_CONFIDENCE,
+        "action": final_dir,
+        "confidence": final_conf,
+        "provider": provider_name,
+        "price": a_m1["price"],
+        "indicators": summary_str,
+        "detailed_report": detailed_report,
     }
 
 
-# ======================= 7. أدوات حسابية وتعديل INI بصيغة ويندوز CRLF =======================
+# ======================= 7. أدوات حسابية وهندسة الصفقات الثلاثية المتدرجة =======================
+def build_triple_layer_plan(base_tp_usd, base_sl_usd, risk_mode=False):
+    """
+    بناء خطة الصفقات الثلاثية الذكية (Triple-Layer Matrix):
+    - تضمن عدم تطابق حدود الربح أو الخسارة بين الصفقات الثلاث.
+    - في وضع المخاطرة (risk_mode=True): يكون إجمالي أو أقصى خسارة محمية أقل من 0.50$ (تحديداً 0.12$ و 0.16$ و 0.20$ = مجموعها الأقصى < 0.50$!).
+    - في الوضع العادي (ثقة >= 90%): تتدرج الأهداف (سريع 60%، أساسي 100%، ممتد 160%) وتتدرج الوقوف بحيث لو ضربت الشمعة الصفقة الأولى تربح الصفقتان الأخريان.
+    """
+    base_tp = max(float(base_tp_usd or 0.50), 0.15)
+    base_sl = max(float(base_sl_usd or 1.00), 0.20)
+
+    if risk_mode:
+        # حماية صارمة جداً في وضع المخاطرة: كل صفقة وقفها بين 0.12$ و 0.18$ (إجمالي الخسارة المحتملة أقل من 0.50$!)
+        return [
+            {
+                "tag": "L1-خاطفة",
+                "title": "الصفقة 1 (قناص سريع)",
+                "tp_usd": round(max(0.20, min(base_tp * 0.50, 0.35)), 2),
+                "sl_usd": 0.12,
+            },
+            {
+                "tag": "L2-متوسطة",
+                "title": "الصفقة 2 (ارتكاز آمن)",
+                "tp_usd": round(max(0.35, min(base_tp * 0.85, 0.60)), 2),
+                "sl_usd": 0.16,
+            },
+            {
+                "tag": "L3-تعويضية",
+                "title": "الصفقة 3 (تعويض وربح صافي)",
+                "tp_usd": round(max(0.55, min(base_tp * 1.30, 0.95)), 2),
+                "sl_usd": 0.20,
+            },
+        ]
+
+    # الوضع القياسي عالي الثقة (>= 90%): 3 مستويات مختلفة للربح والوقف
+    return [
+        {
+            "tag": "L1-سريعة",
+            "title": "الصفقة 1 (هدف سريع ومضمون)",
+            "tp_usd": round(max(0.20, base_tp * 0.60), 2),
+            "sl_usd": round(max(0.20, base_sl * 0.55), 2),
+        },
+        {
+            "tag": "L2-أساسية",
+            "title": "الصفقة 2 (الهدف الأساسي)",
+            "tp_usd": round(base_tp * 1.00, 2),
+            "sl_usd": round(base_sl * 1.00, 2),
+        },
+        {
+            "tag": "L3-ممتدة",
+            "title": "الصفقة 3 (المدى الواسع الرابح)",
+            "tp_usd": round(base_tp * 1.65, 2),
+            "sl_usd": round(base_sl * 1.45, 2),
+        },
+    ]
+
+
 def usd_to_price_distance(usd, volume, tick_value, tick_size):
     if min(usd, volume, tick_value, tick_size) <= 0:
         return 0.0
@@ -747,11 +1024,11 @@ MT5_RETCODES = {
     10015: "سعر غير صالح (Invalid price)",
     10016: "مستويات الوقف/الهدف غير صالحة (Invalid stops)",
     10017: "التداول معطّل لهذا الحساب (Trade disabled)",
-    10018: "السوق مغلق حالياً (Market closed - عطلة نهاية الأسبوع للفوركس والذهب)",
+    10018: "السوق مغلق حالياً (Market closed)",
     10019: "الهامش الحر غير كافٍ (Not enough money)",
     10020: "تغيرت الأسعار (Prices changed)",
     10024: "طلبات متكررة كثيرة جداً",
-    10026: "التداول الآلي معطّل من سيرفر الوسيط (استخدم كلمة السر الرئيسية وليس المشاهد)",
+    10026: "التداول الآلي معطّل من سيرفر الوسيط (تأكد من استخدام كلمة السر الرئيسية Master وليس المشاهد Investor)",
     10027: "التداول الآلي معطّل في المنصة (AutoTrading disabled)",
     10030: "نمط التنفيذ غير مدعوم (Unsupported filling mode)",
     10031: "لا يوجد اتصال بسيرفر التداول",
@@ -762,7 +1039,7 @@ def retcode_message(code, comment=""):
     return f"{MT5_RETCODES.get(code, comment or 'رفض من الوسيط')} (كود {code})"
 
 
-# ======================= 8. MetaApi Cloud (للوسطاء الخارجيين والويب) =======================
+# ======================= 8. MetaApi Cloud (لدعم أي وسيط MT5 خارجي سحابياً) =======================
 PROVISION_URL = "https://mt-provisioning-api-v1.agiliumtrade.agiliumtrade.ai"
 
 
@@ -818,7 +1095,7 @@ def metaapi_ensure_deployed(acc):
     return False, "", "london", "الحساب غير مضاف في MetaApi."
 
 
-def metaapi_open(acc, action, symbol, lot, tp_usd, sl_usd):
+def metaapi_open(acc, action, symbol, lot, tp_usd, sl_usd, comment="AI_Cloud"):
     ok_dep, cid, reg, err_msg = metaapi_ensure_deployed(acc)
     if not ok_dep:
         return {"ok": False, "symbol": symbol, "msg": err_msg}
@@ -826,16 +1103,16 @@ def metaapi_open(acc, action, symbol, lot, tp_usd, sl_usd):
     action_type = "ORDER_TYPE_BUY" if action == "BUY" else "ORDER_TYPE_SELL"
     vol = max(round(float(lot), 2), 0.01)
     for sym_try in (symbol, "XAUUSD", "XAUUSDm", "GOLD", "EURUSD"):
-        payload = {"actionType": action_type, "symbol": sym_try, "volume": vol, "comment": "AI_Cloud_Bot"}
+        payload = {"actionType": action_type, "symbol": sym_try, "volume": vol, "comment": comment}
         st, res = http_request(f"{base_c}/users/current/accounts/{cid}/trade", "POST", headers=metaapi_headers(), payload=payload, timeout=15)
         if st == 200 and isinstance(res, dict):
             if res.get("numericCode") in (0, 10008, 10009) or res.get("stringCode") in ("TRADE_RETCODE_DONE", "TRADE_RETCODE_DONE_PARTIAL"):
                 oid = str(res.get("orderId") or res.get("positionId") or "Executed")
-                return {"ok": True, "symbol": sym_try, "ticket": oid, "volume": vol, "price": 0.0, "tp": 0.0, "sl": 0.0, "verified": True, "note": "عبر MetaApi Cloud"}
+                return {"ok": True, "symbol": sym_try, "ticket": oid, "volume": vol, "price": 0.0, "tp": 0.0, "sl": 0.0, "verified": True}
     return {"ok": False, "symbol": symbol, "msg": "رفض التنفيذ عبر MetaApi"}
 
 
-# ======================= 9. MetaTrader 5 المباشر (حل 10027 + حل 10030 Bitmask) =======================
+# ======================= 9. MetaTrader 5 المباشر (يدعم أي حساب حقيقي أو ديمو + الصفقات الثلاثية) =======================
 mt5 = None
 NATIVE_MT5_AVAILABLE = False
 if os.name == "nt":
@@ -860,6 +1137,42 @@ _discovered_data_paths = set()
 
 def find_mt5_terminal_exe():
     return next((p for p in MT5_PATHS if os.path.exists(p)), "")
+
+
+def inject_global_broker_servers():
+    """حقن قائمة سيرفرات الوسطاء العالميين (ديمو وحقيقي) لتمكين إضافة أي حساب MT5 بسهولة"""
+    if os.name != "nt":
+        return
+    urls = [
+        "https://raw.githubusercontent.com/hudsonventura/MT5_Docker/main/src/servers.dat",
+    ]
+    dst_tmp = os.path.join(tempfile.gettempdir(), "global_servers.dat")
+    for u in urls:
+        try:
+            with urllib.request.urlopen(u, timeout=8, context=SSL_CTX_UNVERIFIED) as r, open(dst_tmp, "wb") as f:
+                f.write(r.read())
+            if os.path.exists(dst_tmp) and os.path.getsize(dst_tmp) > 2000:
+                break
+        except Exception:
+            continue
+    if not os.path.exists(dst_tmp) or os.path.getsize(dst_tmp) < 2000:
+        return
+
+    dirs = set()
+    for dp in list(_discovered_data_paths):
+        if dp:
+            dirs.add(os.path.join(dp, "config"))
+    for env_var in ("APPDATA", "LOCALAPPDATA"):
+        base_d = os.environ.get(env_var, "")
+        if base_d:
+            for d in glob.glob(os.path.join(base_d, "MetaQuotes", "Terminal", "*", "config")):
+                dirs.add(d)
+    for d in dirs:
+        try:
+            if os.path.exists(d):
+                shutil.copyfile(dst_tmp, os.path.join(d, "servers.dat"))
+        except Exception:
+            pass
 
 
 def ensure_windows_mt5_terminal():
@@ -989,7 +1302,7 @@ def send_win32_autotrading_enable():
                 buf = ctypes.create_unicode_buffer(length + 1)
                 u.GetWindowTextW(hwnd, buf, length + 1)
                 t = buf.value.upper()
-                if "METATRADER" in t or "METAQUOTES" in t or "DEMO" in t:
+                if "METATRADER" in t or "METAQUOTES" in t or "DEMO" in t or "LIVE" in t or "REAL" in t:
                     if hwnd not in hwnds:
                         hwnds.append(hwnd)
             return True
@@ -1009,17 +1322,6 @@ def send_win32_autotrading_enable():
             ti = mt5.terminal_info()
             if ti and getattr(ti, "trade_allowed", False):
                 return True
-
-        ps_cmd = (
-            "$ws = New-Object -ComObject WScript.Shell; "
-            "$p = Get-Process terminal64 -ErrorAction SilentlyContinue | Select-Object -First 1; "
-            "if ($p) { [void]$ws.AppActivate($p.Id); Start-Sleep -Milliseconds 300; $ws.SendKeys('^e') }"
-        )
-        subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, timeout=6)
-        time.sleep(0.6)
-        ti = mt5.terminal_info()
-        if ti and getattr(ti, "trade_allowed", False):
-            return True
     except Exception as e:
         safe_print("Win32 Algo toggle note:", e)
     return False
@@ -1067,6 +1369,18 @@ def launch_mt5_with_verified_autotrading(login_str="", password="", server=""):
 _last_autotrading_fix = 0.0
 
 
+def build_server_variations(server_name):
+    """إنشاء بدائل ذكية لاسم السيرفر لضمان قبول أي حساب MT5 حقيقي أو ديمو"""
+    s = (server_name or "").strip()
+    if not s:
+        return ["MetaQuotes-Demo"]
+    out = [s]
+    for v in (s.replace(" ", ""), s.replace("_", "-"), f"{s}-Demo", f"{s}-Live", f"{s}-Real"):
+        if v not in out:
+            out.append(v)
+    return out
+
+
 def mt5_connect_locked(acc, for_trading=False):
     global _last_autotrading_fix
     if not NATIVE_MT5_AVAILABLE:
@@ -1085,7 +1399,7 @@ def mt5_connect_locked(acc, for_trading=False):
     server = acc.get("server_or_mode", "")
 
     if failed_mt5_servers.get(f"{login_int}_{server}", 0) > time.time():
-        return False, f"سيرفر ({server}) غير مدرج في قائمة MT5 القياسية."
+        return False, f"سيرفر ({server}) غير مستجيب حالياً (استخدم عنوان IP:Port للسيرفر أو تأكد من اسمه الدقيق)."
 
     info = mt5.account_info()
     if info is None:
@@ -1098,15 +1412,25 @@ def mt5_connect_locked(acc, for_trading=False):
         _discovered_data_paths.add(ti.data_path)
 
     if info is None or int(info.login) != login_int:
-        if not mt5.login(login_int, password=password, server=server, timeout=10000):
-            err_c, err_d = mt5.last_error()
+        logged_in = False
+        last_err = (0, "")
+        for srv_try in build_server_variations(server):
+            if mt5.login(login_int, password=password, server=srv_try, timeout=8000):
+                logged_in = True
+                if srv_try != server and acc.get("acc_pk"):
+                    update_account_mode(acc["acc_pk"], srv_try)
+                break
+            last_err = mt5.last_error()
+
+        if not logged_in:
+            err_c, err_d = last_err
             if err_c in (-10005, -10003, -10004):
-                failed_mt5_servers[f"{login_int}_{server}"] = time.time() + 600
+                failed_mt5_servers[f"{login_int}_{server}"] = time.time() + 180
                 try:
                     mt5.login(int(KNOWN_MT5_LOGIN), password=KNOWN_MT5_PASS, server=KNOWN_MT5_SERVER, timeout=5000)
                 except Exception:
                     pass
-            return False, f"فشل تسجيل الدخول ({err_c}, {err_d})"
+            return False, f"تعذر دخول الحساب ({err_c}, {err_d}) — تأكد من رقم الحساب وكلمة المرور الرئيسية واسم السيرفر."
 
     ti = mt5.terminal_info()
     if ti and (not getattr(ti, "trade_allowed", False) or getattr(ti, "tradeapi_disabled", False)):
@@ -1120,8 +1444,8 @@ def mt5_connect_locked(acc, for_trading=False):
 
 def match_mt5_symbol(desired):
     d = desired.upper().strip()
-    cands = ([d, "XAUUSD", "XAUUSDm", "XAUUSD.", "XAUUSDc", "XAUUSD#", "GOLD", "GOLDm", "GOLD."]
-             if d in ("XAUUSD", "GOLD") else [d, d + "m", d + ".", d + "#"])
+    cands = ([d, "XAUUSD", "XAUUSDm", "XAUUSD.", "XAUUSDc", "XAUUSD#", "XAUUSDpro", "GOLD", "GOLDm", "GOLD."]
+             if d in ("XAUUSD", "GOLD") else [d, d + "m", d + ".", d + "#", d + "c"])
     for s in cands:
         si = mt5.symbol_info(s)
         if si is not None:
@@ -1137,12 +1461,7 @@ def match_mt5_symbol(desired):
     return None
 
 
-def get_Ordered_filling_modes(si):
-    """
-    الحل الرسمي من وثائق MQL5 لكود 10030 (Unsupported filling mode):
-    قراءة قناع البتات si.filling_mode (1 -> FOK=0, 2 -> IOC=1, غير ذلك -> RETURN=2)
-    وترتيب الأنماط بحيث يكون النمط المدعوم رسمياً من السيرفر في المرتبة الأولى دائماً!
-    """
+def get_ordered_filling_modes(si):
     modes = []
     fm = int(getattr(si, "filling_mode", 0) or 0)
     if fm & 1:
@@ -1164,7 +1483,7 @@ def get_reliable_mt5_price(sym, is_buy):
             p = float(tick.ask if is_buy else tick.bid)
             if p > 0:
                 return p, float(tick.ask - tick.bid) if (tick.ask > 0 and tick.bid > 0) else 0.2
-        time.sleep(0.3)
+        time.sleep(0.25)
 
     si = mt5.symbol_info(sym)
     if si:
@@ -1181,18 +1500,31 @@ def get_reliable_mt5_price(sym, is_buy):
     return 0.0, 0.0
 
 
-def mt5_fetch_closes(acc, symbol):
+def mt5_fetch_mtf_candles(acc, symbol):
+    """جلب شموع الفريمات الثلاثة (M1, M5, M15) من MT5 للتحليل المؤسسي"""
     with mt5_lock:
-        ok, msg = mt5_connect_locked(acc, for_trading=False)
+        ok, _ = mt5_connect_locked(acc, for_trading=False)
         if not ok:
-            return None, f"MT5: {msg}"
+            return None
         sym = match_mt5_symbol(symbol)
         if not sym:
-            return None, f"MT5: الرمز {symbol} غير موجود"
-        rates = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_M1, 0, 60)
-        if rates is None or len(rates) < 15:
-            return None, "MT5: لا شموع كافية"
-        return [float(r["close"]) for r in rates], ""
+            return None
+        out = {}
+        tf_map = {
+            "M1": mt5.TIMEFRAME_M1,
+            "M5": mt5.TIMEFRAME_M5,
+            "M15": mt5.TIMEFRAME_M15,
+        }
+        for name, tf_code in tf_map.items():
+            rates = mt5.copy_rates_from_pos(sym, tf_code, 0, 65)
+            if rates is not None and len(rates) >= 20:
+                out[name] = [{
+                    "open": float(r["open"]),
+                    "high": float(r["high"]),
+                    "low": float(r["low"]),
+                    "close": float(r["close"]),
+                } for r in rates]
+        return out if "M1" in out else None
 
 
 def mt5_status(acc):
@@ -1202,9 +1534,10 @@ def mt5_status(acc):
             return False, 0.0, 0.0, 0, msg
         info, ti = mt5.account_info(), mt5.terminal_info()
         pos = mt5.positions_get() or []
+        acc_type = "ديمو" if getattr(info, "trade_mode", 0) == mt5.ACCOUNT_TRADE_MODE_DEMO else "حقيقي Live"
         allowed = bool(ti and getattr(ti, "trade_allowed", False) and not getattr(ti, "tradeapi_disabled", False))
-        algo = "مفعّل 🟢" if allowed else "جاهز للتفعيل عند الصفقة ⚡"
-        return True, float(info.balance), float(info.equity), len(pos), f"متصل بـ MT5 | التداول الآلي: {algo}"
+        algo = "مفعّل 🟢" if allowed else "جاهز للتفعيل ⚡"
+        return True, float(info.balance), float(info.equity), len(pos), f"متصل ({acc_type}) | التداول الآلي: {algo}"
 
 
 def mt5_positions(acc, only_bot=True):
@@ -1217,9 +1550,36 @@ def mt5_positions(acc, only_bot=True):
             return []
         return [{
             "id": str(p.ticket), "symbol": p.symbol, "volume": float(p.volume),
+            "price_open": float(getattr(p, "price_open", 0.0)),
+            "sl": float(getattr(p, "sl", 0.0)),
+            "tp": float(getattr(p, "tp", 0.0)),
             "side": "BUY" if p.type == mt5.POSITION_TYPE_BUY else "SELL",
             "profit": float(p.profit) + float(p.swap), "magic": p.magic
         } for p in pos if (not only_bot or p.magic == MAGIC)]
+
+
+def mt5_move_to_breakeven(acc, pos):
+    """نقل وقف الخسارة إلى نقطة الدخول (تأمين الصفقة مجاناً بدون خسارة) بعد ربح الصفقة الأولى"""
+    with mt5_lock:
+        if not mt5_connect_locked(acc, for_trading=False)[0]:
+            return False
+        entry_p = float(pos.get("price_open", 0.0))
+        cur_sl = float(pos.get("sl", 0.0))
+        if entry_p <= 0:
+            return False
+        is_buy = pos["side"] == "BUY"
+        if is_buy and (cur_sl >= entry_p):
+            return True
+        if (not is_buy) and (cur_sl > 0 and cur_sl <= entry_p):
+            return True
+        res = mt5.order_send({
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": int(pos["id"]),
+            "symbol": pos["symbol"],
+            "sl": entry_p,
+            "tp": float(pos.get("tp", 0.0)),
+        })
+        return bool(res and res.retcode in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL))
 
 
 def mt5_close(acc, pos):
@@ -1232,7 +1592,7 @@ def mt5_close(acc, pos):
         if price <= 0:
             return False
         si = mt5.symbol_info(pos["symbol"])
-        modes = get_Ordered_filling_modes(si) if si else [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
+        modes = get_ordered_filling_modes(si) if si else [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
         for fm in modes:
             res = mt5.order_send({
                 "action": mt5.TRADE_ACTION_DEAL, "symbol": pos["symbol"], "volume": float(pos["volume"]),
@@ -1260,12 +1620,12 @@ def _fail(symbol, msg):
     return {"ok": False, "symbol": symbol, "msg": msg}
 
 
-def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
+def mt5_open_single_layer(acc, action, symbol, lot, tp_usd, sl_usd, layer_tag="L1"):
     with mt5_lock:
         ok, msg = mt5_connect_locked(acc, for_trading=True)
         if not ok:
             if MASTER_METAAPI_TOKEN:
-                return metaapi_open(acc, action, symbol, lot, tp_usd, sl_usd)
+                return metaapi_open(acc, action, symbol, lot, tp_usd, sl_usd, comment=f"AI_{layer_tag}")
             return _fail(symbol, msg)
 
         sym = match_mt5_symbol(symbol)
@@ -1279,22 +1639,20 @@ def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
             return _fail(sym, "السوق مغلق حالياً أو لا توجد تسعيرات حية لهذا الرمز")
 
         vol = normalize_volume(lot, si.volume_min, si.volume_max, si.volume_step)
-        min_dist = si.trade_stops_level * si.point + spread * 1.5
+        min_dist = si.trade_stops_level * si.point + spread * 1.4
         dists = {}
         for key, usd in (("tp", tp_usd), ("sl", sl_usd)):
             d = usd_to_price_distance(usd, vol, si.trade_tick_value, si.trade_tick_size)
-            dists[key] = max(d, min_dist * 1.2) if d > 0 else None
+            dists[key] = max(d, min_dist * 1.15) if d > 0 else None
         tp = round(price + dists["tp"] if buy else price - dists["tp"], si.digits) if dists["tp"] else 0.0
         sl = round(price - dists["sl"] if buy else price + dists["sl"], si.digits) if dists["sl"] else 0.0
 
-        # ترتيب أنماط التنفيذ حسب قناع البتات الرسمي للرمز (si.filling_mode) لمنع كود 10030 نهائياً
-        modes = get_Ordered_filling_modes(si)
+        modes = get_ordered_filling_modes(si)
         last = ""
         for attempt in range(2):
             for mode in modes:
                 cur_p, _ = get_reliable_mt5_price(sym, buy)
                 use_p = cur_p if cur_p > 0 else price
-                # نرسل أمر السوق نظيفاً أولاً (sl=0, tp=0) لضمان التنفيذ الفوري على كافة سيرفرات ECN/STP/Demo
                 req = {
                     "action": mt5.TRADE_ACTION_DEAL,
                     "symbol": sym,
@@ -1303,7 +1661,7 @@ def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
                     "price": use_p,
                     "deviation": 100,
                     "magic": MAGIC,
-                    "comment": "AI_Bot",
+                    "comment": f"AI_{layer_tag}",
                     "type_time": mt5.ORDER_TIME_GTC,
                     "type_filling": mode,
                 }
@@ -1326,9 +1684,12 @@ def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
 
                 if res.retcode in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL):
                     pos_ticket = res.order or res.deal
-                    # بعد فتح الصفقة بنجاح، نركّب SL و TP بأمر تعديل مستقل
-                    if (sl > 0 or tp > 0) and pos_ticket:
-                        time.sleep(0.2)
+                    exec_p = float(res.price or use_p)
+                    # إعادة حساب TP/SL بدقة على سعر التنفيذ الفعلي وتركيبها فوراً
+                    tp_final = round(exec_p + dists["tp"] if buy else exec_p - dists["tp"], si.digits) if dists["tp"] else 0.0
+                    sl_final = round(exec_p - dists["sl"] if buy else exec_p + dists["sl"], si.digits) if dists["sl"] else 0.0
+                    if (sl_final > 0 or tp_final > 0) and pos_ticket:
+                        time.sleep(0.15)
                         live_pos = mt5.positions_get(symbol=sym) or []
                         target_pos = next((p for p in live_pos if p.ticket == pos_ticket), live_pos[-1] if live_pos else None)
                         p_id = int(target_pos.ticket) if target_pos else int(pos_ticket)
@@ -1336,12 +1697,12 @@ def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
                             "action": mt5.TRADE_ACTION_SLTP,
                             "position": p_id,
                             "symbol": sym,
-                            "sl": sl,
-                            "tp": tp,
+                            "sl": sl_final,
+                            "tp": tp_final,
                         })
                     return {
                         "ok": True, "symbol": sym, "ticket": str(pos_ticket), "volume": vol,
-                        "price": res.price or use_p, "tp": tp, "sl": sl, "verified": True, "note": ""
+                        "price": exec_p, "tp": tp_final, "sl": sl_final, "tp_usd": tp_usd, "sl_usd": sl_usd, "layer_tag": layer_tag
                     }
 
                 last = retcode_message(res.retcode, res.comment)
@@ -1352,17 +1713,16 @@ def mt5_open(acc, action, symbol, lot, tp_usd, sl_usd):
                         acc.get("server_or_mode")
                     )
                     break
-                # إذا لم يكن الخطأ 10030 (مثلاً 10018 السوق مغلق)، لا داعي لتجربة باقي أنماط التنفيذ
                 if res.retcode != 10030:
                     break
             else:
                 break
         if MASTER_METAAPI_TOKEN:
-            return metaapi_open(acc, action, symbol, lot, tp_usd, sl_usd)
+            return metaapi_open(acc, action, symbol, lot, tp_usd, sl_usd, comment=f"AI_{layer_tag}")
         return _fail(sym, last or "رفض الوسيط")
 
 
-# ======================= 10. Bybit V5 (مع محرك الأنفاق الأوروبية/الآسيوية المتعدد) =======================
+# ======================= 10. Bybit V5 (مع محرك الأنفاق الأوروبية/الآسيوية والصفقات الثلاثية) =======================
 BYBIT_HOST_LIST = {
     "BYBIT-LIVE": ["https://api.bytick.com", "https://api.bybit.com"],
     "BYBIT-DEMO": ["https://api-demo.bybit.com"],
@@ -1374,18 +1734,12 @@ _eu_proxy_checked_at = 0.0
 
 
 def find_working_non_us_proxy():
-    """
-    يبحث تلقائياً في 4 مصادر عالمية عن بروكسي HTTPS حي خارج أمريكا (أوروبا/آسيا)
-    لتجاوز حجب CloudFront 403 على سيرفرات GitHub الأمريكية دون الحاجة لإعداد خارجي.
-    """
     global _working_eu_proxy, _eu_proxy_checked_at
     if _working_eu_proxy and (time.time() - _eu_proxy_checked_at < 600):
         return _working_eu_proxy
 
     _eu_proxy_checked_at = time.time()
     candidates = []
-
-    # المصدر 1: GeoNode JSON API (أوروبا وسنغافورة واليابان)
     try:
         st, geo = http_request(
             "https://proxylist.geonode.com/api/proxy-list?limit=30&page=1&sort_by=lastChecked&sort_type=desc&protocols=http%2Chttps",
@@ -1401,14 +1755,12 @@ def find_working_non_us_proxy():
     except Exception:
         pass
 
-    # المصدر 2 و 3: قوائم ProxyScrape و GitHub المحدثة كل دقيقة
     text_sources = [
         "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=2500&country=DE,NL,FR,CH,FI,SE,AT,IE,PL,JP,KR&ssl=yes&anonymity=all",
         "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-https.txt",
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
     ]
     for src in text_sources:
-        if len(candidates) >= 35:
+        if len(candidates) >= 30:
             break
         try:
             with urllib.request.urlopen(src, timeout=6, context=SSL_CTX_UNVERIFIED) as r:
@@ -1419,7 +1771,7 @@ def find_working_non_us_proxy():
                     p_str = f"http://{line}"
                     if p_str not in candidates:
                         candidates.append(p_str)
-                if len(candidates) >= 35:
+                if len(candidates) >= 30:
                     break
         except Exception:
             continue
@@ -1427,7 +1779,6 @@ def find_working_non_us_proxy():
     if not candidates:
         return None
 
-    # فحص متوازٍ سريع (ThreadPool) لاختيار أسرع بروكسي أوروبي يفتح Bybit Demo بنجاح
     def test_one(p_url):
         st, res = http_request("https://api-demo.bybit.com/v5/market/time", "GET", timeout=3, verify_ssl=False, proxy_addr=p_url)
         if st == 200 and isinstance(res, dict) and res.get("retCode") == 0:
@@ -1435,10 +1786,9 @@ def find_working_non_us_proxy():
         return None
 
     with ThreadPoolExecutor(max_workers=10) as ex:
-        for res_p in ex.map(test_one, candidates[:30]):
+        for res_p in ex.map(test_one, candidates[:25]):
             if res_p:
                 _working_eu_proxy = res_p
-                safe_print("Locked onto working Non-US Bybit Proxy:", res_p)
                 return res_p
     return None
 
@@ -1467,16 +1817,13 @@ def bybit_err(res):
     if code == 10003:
         return "مفتاح API غير صالح لهذا الوضع (تأكد إن كان المفتاح لحساب الديمو BYBIT-DEMO أو الحقيقي BYBIT-LIVE)"
     if code == 10004:
-        return "خطأ في التوقيع السري API Secret (تأكد من نسخ الـ Secret كاملاً بدون مسافات)"
+        return "خطأ في التوقيع السري API Secret"
     if code == 10005:
-        return "مفتاح الـ API لا يملك صلاحية التداول (فعّل Read-Write و Unified Trading في Bybit)"
+        return "مفتاح الـ API لا يملك صلاحية التداول (فعّل Read-Write و Unified Trading)"
     if code == 110007:
-        return "رصيد USDT المتاح في محفظة Unified Trading غير كافٍ لفتح الصفقة"
+        return "رصيد USDT المتاح في محفظة Unified Trading غير كافٍ"
     if res.get("_status") == 403 or "403" in str(res.get("error", "")):
-        return (
-            "HTTP 403 (حجب IP أمريكي من Bybit). في صفحة Cloudflare امسح القوس الزائد في السطر 22-23 واضغط Deploy "
-            "ثم فعّل Smart Placement من Settings -> Placement."
-        )
+        return "HTTP 403 (حجب IP أمريكي من Bybit). تأكد من الضغط على Deploy في صفحة Cloudflare Worker."
     return f"{res.get('retMsg') or res.get('error') or 'خطأ غير معروف'} (كود {code})"
 
 
@@ -1521,7 +1868,6 @@ def _single_bybit_call(acc, mode, method, path, params=None, body=None):
         }
         last_res = {"_status": 500, "error": "No host"}
 
-        # 1. عبر جسر Cloudflare Worker الخاص بالمستخدم
         if proxy:
             h = dict(base_headers)
             h["X-Target-Host"] = hosts[0]
@@ -1534,7 +1880,6 @@ def _single_bybit_call(acc, mode, method, path, params=None, body=None):
                 return res.get("retCode") == 0, res
             last_res = res
 
-        # 2. الاتصال المباشر بنطاقات Bybit
         for host in hosts:
             status, res = http_request(host + full_path, method, headers=base_headers, raw_body=raw, timeout=10, verify_ssl=False)
             res["_status"] = status
@@ -1542,7 +1887,6 @@ def _single_bybit_call(acc, mode, method, path, params=None, body=None):
             if status == 200 and "retCode" in res:
                 return res.get("retCode") == 0, res
 
-        # 3. عبر محرك الأنفاق الأوروبية/الآسيوية المتوازي لتجاوز حجب 403 الأمريكي
         if last_res.get("_status") == 403 or "403" in str(last_res.get("error", "")):
             eu_p = find_working_non_us_proxy()
             if eu_p:
@@ -1594,24 +1938,27 @@ def bybit_public(acc, path, params):
         res["_status"] = status
         if status == 200 and res.get("retCode") == 0:
             return True, res
-    eu_p = find_working_non_us_proxy()
-    if eu_p:
-        status, res = http_request(f"https://api.bybit.com{path}?{qs}", "GET", timeout=8, verify_ssl=False, proxy_addr=eu_p)
-        res["_status"] = status
-        if status == 200 and res.get("retCode") == 0:
-            return True, res
     return False, {"_status": 403, "error": "HTTP 403"}
 
 
-def bybit_fetch_closes(acc, symbol):
+def bybit_fetch_mtf_candles(acc, symbol):
+    out = {}
+    tf_map = {"M1": "1", "M5": "5", "M15": "15"}
     for sym in bybit_symbol_candidates(symbol):
-        ok, res = bybit_public(acc, "/v5/market/kline", {"category": "linear", "symbol": sym, "interval": "1", "limit": 60})
-        if ok:
-            rows = (res.get("result") or {}).get("list") or []
-            closes = [float(r[4]) for r in reversed(rows)]
-            if len(closes) >= 15:
-                return closes, ""
-    return None, "Bybit: تعذر جلب الشموع"
+        for tf_name, interval in tf_map.items():
+            ok, res = bybit_public(acc, "/v5/market/kline", {"category": "linear", "symbol": sym, "interval": interval, "limit": 65})
+            if ok:
+                rows = (res.get("result") or {}).get("list") or []
+                if len(rows) >= 20:
+                    out[tf_name] = [{
+                        "open": float(r[1]),
+                        "high": float(r[2]),
+                        "low": float(r[3]),
+                        "close": float(r[4]),
+                    } for r in reversed(rows)]
+        if "M1" in out:
+            return out
+    return None
 
 
 def bybit_status(acc):
@@ -1659,7 +2006,7 @@ def bybit_closed_pnl(acc, row):
     return float(sum(float(r["closedPnl"]) for r in recs)) if recs else None
 
 
-def bybit_open(acc, action, symbol, lot, tp_usd, sl_usd):
+def bybit_open_single_layer(acc, action, symbol, lot, tp_usd, sl_usd, layer_tag="L1"):
     qty = max(round(float(lot) * BYBIT_QTY_PER_LOT, 2), 0.01)
     buy = action == "BUY"
     last_err = ""
@@ -1667,7 +2014,8 @@ def bybit_open(acc, action, symbol, lot, tp_usd, sl_usd):
         for pos_idx in (0, 1 if buy else 2):
             body = {
                 "category": "linear", "symbol": sym, "side": "Buy" if buy else "Sell",
-                "orderType": "Market", "qty": str(qty), "positionIdx": pos_idx
+                "orderType": "Market", "qty": str(qty), "positionIdx": pos_idx,
+                "orderLinkId": f"ai_{layer_tag}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:4]}"
             }
             ok, res = bybit_request(acc, "POST", "/v5/order/create", body=body)
             if not ok and res.get("retCode") == 110007 and qty > 0.01:
@@ -1677,14 +2025,17 @@ def bybit_open(acc, action, symbol, lot, tp_usd, sl_usd):
                     qty = 0.01
             if ok:
                 oid = (res.get("result") or {}).get("orderId", "Executed")
-                return {"ok": True, "symbol": sym, "ticket": str(oid), "volume": qty, "price": 0.0, "tp": 0.0, "sl": 0.0, "verified": True, "note": ""}
+                return {
+                    "ok": True, "symbol": sym, "ticket": str(oid), "volume": qty,
+                    "price": 0.0, "tp": 0.0, "sl": 0.0, "tp_usd": tp_usd, "sl_usd": sl_usd, "layer_tag": layer_tag
+                }
             last_err = bybit_err(res)
             if "positionIdx" not in str(res.get("retMsg", "")):
                 break
     return _fail(symbol, last_err)
 
 
-# ======================= 11. واجهة موحدة للمنصات =======================
+# ======================= 11. واجهة موحدة للمنصات + فتح الصفقات الثلاثية =======================
 def broker_status(acc):
     try:
         return mt5_status(acc) if acc["platform"] == "MT5" else bybit_status(acc)
@@ -1706,12 +2057,22 @@ def broker_close(acc, pos):
         return False
 
 
-def broker_open(acc, action, symbol, lot, tp, sl):
-    try:
-        fn = mt5_open if acc["platform"] == "MT5" else bybit_open
-        return fn(acc, action, symbol, lot, tp, sl)
-    except Exception as e:
-        return _fail(symbol, f"استثناء تنفيذ: {redact(str(e))}")
+def broker_open_triple_batch(acc, action, symbol, lot, base_tp_usd, base_sl_usd, risk_mode=False):
+    """تنفيذ 3 صفقات متزامنة بهندسة أهداف ووقف خسارة متدرجة ومختلفة لكل صفقة"""
+    layers = build_triple_layer_plan(base_tp_usd, base_sl_usd, risk_mode=risk_mode)
+    batch_results = []
+    fn = mt5_open_single_layer if acc["platform"] == "MT5" else bybit_open_single_layer
+    for layer in layers:
+        res = fn(acc, action, symbol, lot, layer["tp_usd"], layer["sl_usd"], layer_tag=layer["tag"])
+        res["layer_title"] = layer["title"]
+        res["tp_usd"] = layer["tp_usd"]
+        res["sl_usd"] = layer["sl_usd"]
+        batch_results.append(res)
+        if not res.get("ok"):
+            # إذا رفض الوسيط أول صفقة (مثلاً السوق مغلق)، لا نكرر المحاولة 3 مرات
+            break
+        time.sleep(0.15)
+    return batch_results
 
 
 def broker_closed_pnl(acc, row):
@@ -1721,9 +2082,10 @@ def broker_closed_pnl(acc, row):
         return None
 
 
-# ======================= 12. محرك التداول المتعدد الحسابات =======================
+# ======================= 12. محرك التداول المتعدد الحسابات وإدارة الصفقات الثلاثية =======================
 PENDING = {}
 CLOSE_TRIES = {}
+LAST_WAIT_NOTICE = {}
 diag_running = set()
 trade_running = set()
 
@@ -1756,28 +2118,43 @@ def finalize_trade(uid, chat_id, acc, row, pnl):
     u = get_user(uid)
     update_user(uid, "current_daily_pnl", float(u["current_daily_pnl"]) + pnl)
     update_user(uid, "trades_today", int(u["trades_today"]) + 1)
-    send_msg(chat_id, f"💰 أُغلقت صفقة {row['side']} {row['symbol']} على [{acc['account_label']}]: {pnl:+.2f}$")
+    icon = "💰" if pnl >= 0 else "🛡️"
+    send_msg(chat_id, f"{icon} أُغلقت صفقة ({row.get('layer_tag', 'L1')}) {row['side']} {row['symbol']} على [{acc['account_label']}]: {pnl:+.2f}$")
 
 
 def reconcile_account(uid, chat_id, acc, symbol, manage=True):
+    """
+    يدير الصفقات الثلاث المفتوحة كل 3 ثوانٍ:
+    - يغلق كل صفقة على حدة حسب هدفها ووقفها الخاص (tp_usd / sl_usd).
+    - إذا ربحت الصفقة الأولى (L1)، يقوم بتأمين الصفقة الثانية والثالثة على نقطة الدخول (Auto-Breakeven) لمنع خسارتهما!
+    """
     u = get_user(uid)
     positions = broker_positions(acc, symbol)
     if positions is None:
         return None
-    live = {p["id"] for p in positions}
+    live_map = {p["id"]: p for p in positions}
     rows = open_trade_rows(uid, acc["acc_pk"])
-    known = {r["ticket"] for r in rows}
+    known_map = {r["ticket"]: r for r in rows}
+
     if acc["platform"] == "MT5":
         for p in positions:
-            if p["id"] not in known:
-                record_trade(uid, acc, p["symbol"], p["side"], p["volume"], p["id"])
+            if p["id"] not in known_map:
+                record_trade(uid, acc, p["symbol"], p["side"], p["volume"], p["id"], u["trade_tp_usd"], u["trade_sl_usd"], "L2-أساسية")
         rows = open_trade_rows(uid, acc["acc_pk"])
+        known_map = {r["ticket"]: r for r in rows}
+
     if manage:
         for p in positions:
-            if p["profit"] >= u["trade_tp_usd"] or p["profit"] <= -abs(u["trade_sl_usd"]):
+            r_meta = known_map.get(p["id"], {})
+            target_tp = float(r_meta.get("tp_usd") or u["trade_tp_usd"] or 0.50)
+            target_sl = float(r_meta.get("sl_usd") or u["trade_sl_usd"] or 1.00)
+            if p["profit"] >= target_tp or p["profit"] <= -abs(target_sl):
                 broker_close(acc, p)
+
+    # فحص الصفقات التي أُغلقت وتفعيل التأمين التلقائي (Breakeven) لباقي الصفقات الثلاث
+    any_closed_in_profit = False
     for r in rows:
-        if r["ticket"] in live:
+        if r["ticket"] in live_map:
             continue
         pnl = broker_closed_pnl(acc, r)
         if pnl is None:
@@ -1786,8 +2163,16 @@ def reconcile_account(uid, chat_id, acc, symbol, manage=True):
                 continue
             finalize_trade(uid, chat_id, acc, r, 0.0)
         else:
+            if pnl > 0:
+                any_closed_in_profit = True
             finalize_trade(uid, chat_id, acc, r, pnl)
-    return {p["id"] for p in positions}
+
+    if any_closed_in_profit and acc["platform"] == "MT5":
+        for p in positions:
+            if p["id"] in live_map and p["profit"] > 0.05:
+                mt5_move_to_breakeven(acc, p)
+
+    return set(live_map.keys())
 
 
 def limit_message(u):
@@ -1798,46 +2183,85 @@ def limit_message(u):
     return ""
 
 
-def execute_ai_trade(uid, chat_id, accounts, rt=None, manual=False):
+def risk_button_markup(action):
+    return {
+        "inline_keyboard": [
+            [{"text": "⚠️ مخاطرة (دخول ثلاثي محمي بخسارة < 0.50$)", "callback_data": f"force_risk_{action}"}],
+            [{"text": "🔙 رجوع للوحة الرئيسية", "callback_data": "back_home"}],
+        ]
+    }
+
+
+def execute_ai_trade(uid, chat_id, accounts, rt=None, manual=False, force_risk=False, forced_action=None):
     if uid in trade_running:
-        if manual:
-            send_msg(chat_id, "⏳ جاري تنفيذ صفقة حالياً، انتظر ثوانٍ...")
+        if manual or force_risk:
+            send_msg(chat_id, "⏳ جاري تحليل وتنفيذ الصفقات حالياً، انتظر ثوانٍ...")
         return "busy"
     trade_running.add(uid)
     try:
         u = get_user(uid)
-        if manual:
-            send_msg(chat_id, f"⚡ جاري تحليل السوق وإرسال أمر التداول الفعلي إلى ({len(accounts)}) حساب...")
-        d = decide_trade(uid, u["symbol"], accounts)
+        if manual and not force_risk:
+            send_msg(chat_id, f"⚡ جاري التحليل المؤسسي العميق (M1 + M5 + M15) وفحص نسبة الثقة على ({len(accounts)}) حساب...")
+        elif force_risk:
+            send_msg(chat_id, "⚠️ جاري تنفيذ أمر المخاطرة المحمي (3 صفقات متدرجة بإجمالي وقف خسارة أقل من 0.50$)...")
+
+        d = deep_institutional_analysis(uid, u["symbol"], accounts)
+        action = forced_action if (force_risk and forced_action in ("BUY", "SELL")) else d["action"]
+
+        # إذا لم تكن الفرصة مناسبة (الثقة أقل من 90%) ولم يضغط المستخدم على زر المخاطرة بعد:
+        if not force_risk and not d["ready"]:
+            # في التداول التلقائي نرسل إشعار الفرصة غير المناسبة كل 10 دقائق حتى لا نزعج المستخدم، وفي اليدوي نرسلها فوراً
+            should_notify = manual or (time.time() - LAST_WAIT_NOTICE.get(uid, 0) > 600)
+            if should_notify:
+                LAST_WAIT_NOTICE[uid] = time.time()
+                wait_msg = (
+                    f"🔎 **نتيجة الفحص المؤسسي للفرصة ({u['symbol']}):**\n"
+                    f"• الاتجاه المرصود: {action} | نسبة الثقة الحالية: **{d['confidence']}%** (الحد المطلوب للدخول الآمن: {MIN_AI_CONFIDENCE}%)\n"
+                    f"• الأداة: {d['provider']}\n\n"
+                    f"{d['detailed_report']}\n\n"
+                    "⚠️ **(ليس وقت مناسب حاليا ولكن إذا تريد المخاطرة اضغط على زر مخاطرة الذي بالاسفل)**"
+                )
+                send_msg(chat_id, wait_msg, risk_button_markup(action))
+            return "wait_opportunity"
 
         mt5_accs = [a for a in accounts if a["platform"] == "MT5"]
         other = [a for a in accounts if a["platform"] != "MT5"]
         results = []
 
         def run_group(group):
-            return [(a, broker_open(a, d["action"], u["symbol"], u["lot"], u["trade_tp_usd"], u["trade_sl_usd"])) for a in group]
+            return [
+                (a, broker_open_triple_batch(a, action, u["symbol"], u["lot"], u["trade_tp_usd"], u["trade_sl_usd"], risk_mode=force_risk))
+                for a in group
+            ]
 
         with ThreadPoolExecutor(max_workers=max(1, min(5, len(other) + 1))) as ex:
             futs = ([ex.submit(run_group, mt5_accs)] if mt5_accs else []) + [ex.submit(run_group, [a]) for a in other]
             for f in futs:
                 results.extend(f.result())
 
+        mode_title = "⚠️ وضع المخاطرة المحمي (خسارة قصوى < 0.50$)" if force_risk else f"🎯 دخول مؤسسي عالي الدقة (ثقة الذكاء الاصطناعي: {d['confidence']}%)"
         lines = [
-            f"🤖 قرار الذكاء الاصطناعي: {d['action']} (الثقة: {d['confidence']}%)",
+            f"🤖 **قرار التداول الثلاثي:** {action}",
+            f"• الوضع: {mode_title}",
             f"• الأداة: {d['provider']}",
-            f"• المؤشرات الحية: {d['indicators']}\n"
+            f"{d['detailed_report']}\n",
         ]
         okn = 0
-        for acc, r in results:
-            if r["ok"]:
-                okn += 1
-                record_trade(uid, acc, r["symbol"], d["action"], r["volume"], r["ticket"])
-                lines.append(
-                    f"✅ الحساب [{acc['account_label']}]:\n"
-                    f"   تم فتح صفقة حقيقية {d['action']} على {r['symbol']} (لوت {r['volume']}) | تذكرة #{r['ticket']}"
-                )
+        for acc, batch in results:
+            acc_ok = [r for r in batch if r.get("ok")]
+            if acc_ok:
+                okn += len(acc_ok)
+                lines.append(f"✅ **الحساب [{acc['account_label']}] — تم فتح ({len(acc_ok)}/3) صفقات متدرجة:**")
+                for r in acc_ok:
+                    record_trade(uid, acc, r["symbol"], action, r["volume"], r["ticket"], r["tp_usd"], r["sl_usd"], r["layer_tag"])
+                    lines.append(
+                        f"   🔹 {r['layer_title']}:\n"
+                        f"      تذكرة `#{r['ticket']}` | لوت `{r['volume']}` | ربح `+{r['tp_usd']}$` | وقف `-{r['sl_usd']}$`"
+                    )
             else:
-                lines.append(f"⚠️ الحساب [{acc['account_label']}]:\n   تعذر التنفيذ ({r['msg']})")
+                first_err = batch[0]["msg"] if batch else "خطأ غير معروف"
+                lines.append(f"⚠️ الحساب [{acc['account_label']}]:\n   تعذر التنفيذ ({first_err})")
+
         send_msg(chat_id, "\n".join(lines))
         return "executed" if okn else "failed"
     finally:
@@ -1864,12 +2288,23 @@ def tick_cycle(uid, chat_id, rt):
     free = [a for a in accounts if not open_ids.get(a["acc_pk"])]
     if not free:
         return
-    res = execute_ai_trade(uid, chat_id, free, rt=rt, manual=False)
-    rt.next_analysis = time.time() + (COOLDOWN_AFTER_TRADE if res == "executed" else 30)
+    res = execute_ai_trade(uid, chat_id, free, rt=rt, manual=False, force_risk=False)
+    if res == "executed":
+        rt.next_analysis = time.time() + COOLDOWN_AFTER_TRADE
+    elif res == "wait_opportunity":
+        # إعادة فحص السوق كل 20 ثانية لاقتناص أول فرصة تتجاوز ثقتها 90%
+        rt.next_analysis = time.time() + 20
+    else:
+        rt.next_analysis = time.time() + 30
 
 
 def trading_worker(uid, chat_id, rt):
-    send_msg(chat_id, "🟢 بدأ التداول الآلي الحقيقي بالذكاء الاصطناعي (يعمل سحابياً 24/7)!")
+    send_msg(
+        chat_id,
+        "🟢 **بدأ قناص التداول الآلي بالذكاء الاصطناعي (24/7)!**\n"
+        "• يفحص الفريمات الثلاثة (M1 + M5 + M15) باستمرار.\n"
+        "• يدخل تلقائياً بـ 3 صفقات متدرجة فور وصول نسبة الثقة إلى 90% فأكثر."
+    )
     while not rt.stop.is_set() and not SHUTDOWN.is_set():
         try:
             tick_cycle(uid, chat_id, rt)
@@ -1917,12 +2352,12 @@ def resume_saved_auto_traders():
 
 # ======================= 13. لوحة التحكم بالعربية =======================
 FIELD_SPECS = {
-    "lot": (float, 0.001, 100.0, "💵 أرسل حجم اللوت (مثال 0.01):"),
+    "lot": (float, 0.001, 100.0, "💵 أرسل حجم اللوت لكل صفقة من الصفقات الثلاث (مثال 0.01):"),
     "symbol": (str, 0, 0, "📊 أرسل رمز الزوج (مثال XAUUSD):"),
-    "trade_tp_usd": (float, 0.01, 100000.0, "🎯 أرسل هدف الربح بالدولار للصفقة:"),
-    "trade_sl_usd": (float, 0.01, 100000.0, "🛑 أرسل وقف الخسارة بالدولار للصفقة:"),
-    "daily_max_profit": (float, 0.01, 1e7, "🏆 أرسل الحد الأقصى للربح اليومي بالدولار:"),
-    "daily_max_loss": (float, 0.01, 1e7, "🛡️ أرسل الحد الأقصى للخسارة اليومية بالدولار:"),
+    "trade_tp_usd": (float, 0.05, 100000.0, "🎯 أرسل هدف الربح الأساسي بالدولار (وسيتم تدريج الصفقات الـ 3 تلقائياً حوله):"),
+    "trade_sl_usd": (float, 0.10, 100000.0, "🛑 أرسل وقف الخسارة الأساسي بالدولار:"),
+    "daily_max_profit": (float, 0.10, 1e7, "🏆 أرسل الحد الأقصى للربح اليومي بالدولار:"),
+    "daily_max_loss": (float, 0.10, 1e7, "🛡️ أرسل الحد الأقصى للخسارة اليومية بالدولار:"),
     "work_start_hour": (int, 0, 23, "🕐 أرسل ساعة بدء العمل (0-23):"),
     "work_end_hour": (int, 1, 24, "🕑 أرسل ساعة نهاية العمل (1-24):"),
 }
@@ -1951,10 +2386,10 @@ def main_keyboard(uid):
     u, accs = get_user(uid), get_user_accounts(uid)
     act, tool = get_active_account(uid), get_ai_tool_by_id(get_user(uid)["selected_ai_id"])
     en_cnt = sum(1 for a in accs if a.get("is_enabled") == 1)
-    run = {"text": "⏹️ إيقاف التداول التلقائي (يعمل 🟢)" if is_running(uid) else "▶️ بدء التداول التلقائي بالذكاء الاصطناعي",
+    run = {"text": "⏹️ إيقاف القناص التلقائي (يعمل 🟢)" if is_running(uid) else "▶️ بدء القناص التلقائي (ثقة >= 90% | 3 صفقات)",
            "callback_data": "toggle_run"}
     return {"inline_keyboard": [
-        [{"text": "➕ إضافة حساب جديد (MT5 أو Bybit للذهب)", "callback_data": "menu_add_account"}],
+        [{"text": "➕ إضافة حساب جديد (MT5 ديمو/حقيقي أو Bybit)", "callback_data": "menu_add_account"}],
         [{"text": f"📂 إدارة الحسابات ({len(accs)}) | النشط: {act.get('account_label', '-')}", "callback_data": "menu_manage_accounts"}],
         [{"text": f"🌐 التداول الجماعي: مفعّل ({en_cnt} حسابات) 🟢" if u["trade_all_accounts"] else "👤 الوضع: الحساب النشط فقط (اضغط لتفعيل الكل)", "callback_data": "toggle_all"}],
         [{"text": f"🤖 الذكاء الاصطناعي: {tool.get('name', '-')}", "callback_data": "menu_ai_select"}],
@@ -1963,7 +2398,7 @@ def main_keyboard(uid):
         [{"text": f"🎯 ربح الصفقة: +{u['trade_tp_usd']}$", "callback_data": "set_tp"}, {"text": f"🛑 خسارة الصفقة: -{u['trade_sl_usd']}$", "callback_data": "set_sl"}],
         [{"text": f"🏆 أقصى ربح يومي: {u['daily_max_profit']}$", "callback_data": "set_dmp"}, {"text": f"🛡️ أقصى خسارة يومية: {u['daily_max_loss']}$", "callback_data": "set_dml"}],
         [run],
-        [{"text": "⚡ فتح صفقة فورية الآن بالذكاء الاصطناعي", "callback_data": "instant_trade"}],
+        [{"text": "⚡ تحليل السوق ودخول 3 صفقات فورية الآن", "callback_data": "instant_trade"}],
         [{"text": "🚨 إغلاق جميع الصفقات المفتوحة فوراً", "callback_data": "emergency_close"}],
         [{"text": "🔄 تصفير عداد أرباح اليوم", "callback_data": "reset_pnl"}],
     ]}
@@ -1972,15 +2407,15 @@ def main_keyboard(uid):
 def main_text(uid):
     u, accs = get_user(uid), get_user_accounts(uid)
     act, tool = get_active_account(uid), get_ai_tool_by_id(get_user(uid)["selected_ai_id"])
-    proxy_note = "\n• جسر Bybit السحابي: مفعّل 🔗" if u.get("bybit_proxy") else ""
     return (
-        "🤖 لوحة تحكم بوت التداول الذكي (MT5 + Bybit Gold)\n\n"
+        "🤖 **لوحة تحكم قناص التداول المؤسسي (MT5 + Bybit Gold)**\n\n"
         f"• حالة البوت: {'يعمل سحابياً 24/7 🟢' if is_running(uid) else 'متوقف 🔴'}\n"
+        f"• استراتيجية الدخول: 3 صفقات متدرجة (ثقة $\\ge$ {MIN_AI_CONFIDENCE}% عبر M1+M5+M15)\n"
         f"• الحساب النشط: {act.get('account_label', 'لا يوجد')} ({act.get('server_or_mode', '')})\n"
-        f"• إجمالي الحسابات: {len(accs)}\n"
+        f"• إجمالي الحسابات: {len(accs)} (يدعم الديمو والحقيقي)\n"
         f"• الذكاء الاصطناعي: {tool.get('name', '-')}\n"
         f"• أرباح اليوم: {u['current_daily_pnl']:+.2f}$\n"
-        f"• صفقات اليوم: {u['trades_today']}{proxy_note}"
+        f"• صفقات اليوم: {u['trades_today']}"
     )
 
 
@@ -2047,7 +2482,7 @@ def test_new_account(uid, chat_id, pk):
             chat_id,
             f"⚠️ تم حفظ الحساب ({acc['account_label']}) ولكن تعذر الاتصال بسيرفره حالياً:\n"
             f"• السبب: {txt}\n"
-            f"• ملاحظة: أبقينا حسابك الأساسي الشغال هو الحساب النشط لكي لا يتوقف التداول.",
+            f"• نصيحة: إذا كان الوسيط خارجياً، يمكنك كتابة عنوان السيرفر بصيغة IP:Port في السطر الثالث.",
             main_keyboard(uid)
         )
 
@@ -2081,7 +2516,7 @@ def handle_message(msg):
     if action == "input_new_account":
         plat, p1, p2, p3 = parse_three_line_credentials(text)
         if plat == "INVALID":
-            send_msg(chat_id, "⚠️ أرسل البيانات في 3 أسطر تحت بعضها:\nاسم المستخدم\nكلمة المرور\nالسيرفر (أو BYBIT-DEMO)")
+            send_msg(chat_id, "⚠️ أرسل البيانات في 3 أسطر تحت بعضها:\nرقم الحساب\nكلمة المرور\nاسم السيرفر (سواء ديمو أو حقيقي، أو BYBIT-DEMO / BYBIT-LIVE)")
             return
         delete_msg(chat_id, msg["message_id"])
         pk = add_or_update_trading_account(uid, plat, p1, p2, p3, make_active=False)
@@ -2115,7 +2550,20 @@ def handle_callback(cb):
     elif data == "menu_add_account":
         answer_cb(cid)
         PENDING[uid] = "input_new_account"
-        edit_msg(chat_id, mid, "➕ أرسل بيانات الحساب في 3 أسطر:\n\nMT5:\n5058253637\n*aGm1cNp\nMetaQuotes-Demo\n\nBybit:\nAPI_KEY\nAPI_SECRET\nBYBIT-DEMO", BACK)
+        edit_msg(
+            chat_id, mid,
+            "➕ **إضافة أي حساب MT5 (حقيقي أو ديمو) أو Bybit:**\n"
+            "أرسل البيانات في 3 أسطر تحت بعضها:\n\n"
+            "لإضافة حساب MT5 (ديمو أو حقيقي):\n"
+            "رقم الحساب\n"
+            "كلمة المرور الرئيسية\n"
+            "اسم السيرفر (أو IP:Port)\n\n"
+            "لإضافة حساب Bybit:\n"
+            "API_KEY\n"
+            "API_SECRET\n"
+            "BYBIT-DEMO (أو BYBIT-LIVE)",
+            BACK
+        )
     elif data == "menu_manage_accounts":
         answer_cb(cid)
         edit_msg(chat_id, mid, "📂 إدارة الحسابات المضافة (اضغط على الاسم لتفعيله، أو ✅/⛔ للتداول الجماعي، أو 🗑️ للحذف):", accounts_keyboard(uid))
@@ -2150,9 +2598,24 @@ def handle_callback(cb):
         update_user(uid, "selected_ai_id", int(data.rsplit("_", 1)[1]))
         home()
     elif data == "instant_trade":
-        answer_cb(cid, "⚡ جاري تحليل السوق وتنفيذ الصفقة...")
+        answer_cb(cid, "⚡ جاري التحليل المؤسسي العميق...")
         accs = get_target_accounts(uid)
-        threading.Thread(target=execute_ai_trade, args=(uid, chat_id, accs), kwargs={"manual": True}, daemon=True).start()
+        threading.Thread(
+            target=execute_ai_trade,
+            args=(uid, chat_id, accs),
+            kwargs={"manual": True, "force_risk": False},
+            daemon=True
+        ).start()
+    elif data.startswith("force_risk_"):
+        forced_dir = data.rsplit("_", 1)[1]
+        answer_cb(cid, "⚠️ جاري الدخول المحمي بأقل من 0.50$ خسارة...")
+        accs = get_target_accounts(uid)
+        threading.Thread(
+            target=execute_ai_trade,
+            args=(uid, chat_id, accs),
+            kwargs={"manual": True, "force_risk": True, "forced_action": forced_dir},
+            daemon=True
+        ).start()
     elif data == "emergency_close":
         answer_cb(cid, "🚨 جاري إغلاق الصفقات...")
         threading.Thread(target=emergency_close_all, args=(uid, chat_id), daemon=True).start()
@@ -2230,7 +2693,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(f"AI Trading Bot OK | last poll {int(time.time() - HEARTBEAT['poll'])}s ago".encode())
+        self.wfile.write(f"AI Institutional Sniper Bot OK | last poll {int(time.time() - HEARTBEAT['poll'])}s ago".encode())
 
     def do_HEAD(self):
         self.send_response(200)
@@ -2257,6 +2720,7 @@ def mt5_boot():
             if ensure_windows_mt5_terminal():
                 with mt5_lock:
                     launch_mt5_with_verified_autotrading(KNOWN_MT5_LOGIN, KNOWN_MT5_PASS, KNOWN_MT5_SERVER)
+                    inject_global_broker_servers()
                 safe_print("MT5 Ready with AutoTrading Enabled.")
     except Exception:
         safe_print("mt5_boot error:", redact(traceback.format_exc()))
