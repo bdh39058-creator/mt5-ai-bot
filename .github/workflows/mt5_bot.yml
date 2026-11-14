@@ -40,23 +40,17 @@ jobs:
           Stop-Process -Name "terminal64" -Force -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 2
           python -m pip install --upgrade pip
-          pip install MetaTrader5
+          pip install MetaTrader5 numpy
 
       - name: 4. Run Multi-Account AI Bot
         env:
           PYTHONIOENCODING: utf-8
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          SECRET_ACCESS_KEY: ${{ secrets.SECRET_ACCESS_KEY }}
           GROQ_TOKEN: ${{ secrets.GROQ_TOKEN }}
-          GEMINI_TOKEN: ${{ secrets.GEMINI_TOKEN }}
-          COHERE_TOKEN: ${{ secrets.COHERE_TOKEN }}
-          GH_MODELS_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
-          OPENROUTER1_TOKEN: ${{ secrets.OPENROUTER1_TOKEN }}
-          HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
-          SAMBANOVA_TOKEN: ${{ secrets.SAMBANOVA_TOKEN }}
-          METAAPI_TOKEN: ${{ secrets.METAAPI_TOKEN }}
-          BYBIT_API_KEY: ${{ secrets.BYBIT_API_KEY }}
-          BYBIT_API_SECRET: ${{ secrets.BYBIT_API_SECRET }}
-          BYBIT_PROXY_URL: "https://bybit-bridge.bdh39058.workers.dev"
+          MT5_LOGIN: ${{ secrets.MT5_LOGIN }}
+          MT5_PASSWORD: ${{ secrets.MT5_PASSWORD }}
+          MT5_SERVER: ${{ secrets.MT5_SERVER }}
         run: |
           python -X utf8 main.py
 
