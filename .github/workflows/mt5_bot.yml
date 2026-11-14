@@ -1,4 +1,4 @@
-name: MT5 Multi-Account AI Bot 24/7
+name: MT5 Telegram Multi-Account Bot 24/7
 
 on:
   push:
@@ -25,12 +25,11 @@ jobs:
         shell: bash
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          MT5_LOGIN: ${{ secrets.MT5_LOGIN }}
-          MT5_PASSWORD: ${{ secrets.MT5_PASSWORD }}
-          MT5_SERVER: ${{ secrets.MT5_SERVER }}
+          SECRET_ACCESS_KEY: ${{ secrets.SECRET_ACCESS_KEY }}
+          DB_ENCRYPTION_KEY: ${{ secrets.DB_ENCRYPTION_KEY }}
         run: |
           missing=0
-          for v in TELEGRAM_BOT_TOKEN MT5_LOGIN MT5_PASSWORD MT5_SERVER; do
+          for v in TELEGRAM_BOT_TOKEN SECRET_ACCESS_KEY DB_ENCRYPTION_KEY; do
             if [ -z "${!v}" ]; then echo "::error::Secret $v is missing"; missing=1; fi
           done
           exit $missing
@@ -54,18 +53,16 @@ jobs:
           Stop-Process -Name "terminal64" -Force -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 2
           python -m pip install --upgrade pip
-          pip install MetaTrader5 numpy
+          pip install MetaTrader5 numpy cryptography
 
-      - name: 4. Run Trading Bot
+      - name: 4. Run Bot Manager
         env:
           PYTHONIOENCODING: utf-8
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SECRET_ACCESS_KEY: ${{ secrets.SECRET_ACCESS_KEY }}
-          GROQ_TOKEN: ${{ secrets.GROQ_TOKEN }}
-          MT5_LOGIN: ${{ secrets.MT5_LOGIN }}
-          MT5_PASSWORD: ${{ secrets.MT5_PASSWORD }}
-          MT5_SERVER: ${{ secrets.MT5_SERVER }}
+          DB_ENCRYPTION_KEY: ${{ secrets.DB_ENCRYPTION_KEY }}
+          BOT_UTC_OFFSET: "2"
+          MAX_ACCOUNTS: "6"
         run: |
           python -X utf8 main.py
 
@@ -80,10 +77,8 @@ jobs:
           git config --global user.email "bot@users.noreply.github.com"
           git add multi_mt5_gold_bot.db || true
           git diff --staged --quiet || git commit -m "Auto-save bot state [skip ci]" || true
-          git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
-          git push origin "HEAD:${GITHUB_REF_NAME}" || true
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || git rebase --abort || true
+          git push origin "HEAD:${GITHUB_REF_NAME}" || git push origin "HEAD:${GITHUB_REF_NAME}" --force || true
           if [ -f restart.flag ]; then
             gh workflow run mt5_bot.yml --ref "${GITHUB_REF_NAME}" || true
-          else
-            echo "البوت لم ينهِ دورته بشكل طبيعي: لا إعادة تشغيل فورية (الـ cron سيحاول لاحقاً)"
           fi
