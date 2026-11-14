@@ -1,4 +1,5 @@
 runtime.db
+state_live.db
 restart.flag
 __pycache__/
 *.log
