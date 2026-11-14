@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""MT5 Telegram Scalper v6: مدير حسابات متعدد، تحكم كامل من تليجرام"""
+"""MT5 Telegram Scalper v6.1: مدير حسابات متعدد، تحكم كامل من تليجرام"""
 import os, sys, time, json, glob, shutil, sqlite3, subprocess, base64, hashlib, math, urllib.request
 from datetime import datetime, timezone, timedelta
 import numpy as np
@@ -17,18 +17,34 @@ def env(k, d=""):
     return v.strip().strip('"').strip("'") if v and v.strip() else d
 
 
+def env_int(k, d):
+    try:
+        return int(env(k, str(d)))
+    except Exception:
+        return d
+
+
+def env_float(k, d):
+    try:
+        return float(env(k, str(d)))
+    except Exception:
+        return d
+
+
 TG_TOKEN = env("TELEGRAM_BOT_TOKEN")
 SECRET = env("SECRET_ACCESS_KEY")
 DB_KEY = env("DB_ENCRYPTION_KEY")
-UTC_OFF = int(env("BOT_UTC_OFFSET", "2"))
-MAX_ACCOUNTS = int(env("MAX_ACCOUNTS", "6"))
-SPREAD_RATIO = float(env("MAX_SPREAD_RATIO", "0.4"))     # أقصى نسبة سبريد من الهدف
-MAX_HOLD_MIN = int(env("MAX_HOLD_MINUTES", "20"))        # إغلاق زمني للصفقة العالقة
+UTC_OFF = env_int("BOT_UTC_OFFSET", 2)
+MAX_ACCOUNTS = env_int("MAX_ACCOUNTS", 6)
+SPREAD_RATIO = env_float("MAX_SPREAD_RATIO", 0.4)
+MAX_HOLD_MIN = env_int("MAX_HOLD_MINUTES", 20)
 MAGIC = 990066
-DB, RT = "multi_mt5_gold_bot.db", "runtime.db"
+DB = "state_live.db"              # القاعدة الحية (لا تُرفع)
+SNAP = "bot_state_v6.db"          # نسخة سليمة تُرفع إلى GitHub
+RT = "runtime.db"
 START = time.time()
 MAX_RUNTIME = 335 * 60
-SESSION = (7, 20)                                         # UTC
+SESSION = (7, 20)
 DIRTY = False
 SECRETS = [TG_TOKEN, SECRET, DB_KEY]
 AR_DAYS = ["الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد"]
@@ -76,6 +92,8 @@ def q(file, sql, args=(), one=False):
 
 
 def init_db():
+    if not os.path.exists(DB) and os.path.exists(SNAP):
+        shutil.copy(SNAP, DB)                           # استعادة الحالة المحفوظة
     q(DB, "CREATE TABLE IF NOT EXISTS users(chat TEXT PRIMARY KEY)")
     q(DB, """CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT, blob TEXT,
         enabled INT DEFAULT 1, trading INT DEFAULT 0, lot REAL DEFAULT 0.01, tp REAL DEFAULT 1.0,
@@ -85,6 +103,23 @@ def init_db():
     q(RT, "CREATE TABLE IF NOT EXISTS status(acc INTEGER PRIMARY KEY, txt TEXT, ts REAL)")
     q(RT, "CREATE TABLE IF NOT EXISTS cmds(id INTEGER PRIMARY KEY AUTOINCREMENT, acc INT, cmd TEXT, ts REAL)")
     q(RT, "CREATE TABLE IF NOT EXISTS risk(acc INTEGER PRIMARY KEY, plan TEXT, ts REAL)")
+    q(RT, "CREATE TABLE IF NOT EXISTS notif(k TEXT PRIMARY KEY, ts REAL)")
+
+
+def snapshot():
+    """نسخة سليمة من القاعدة الحية عبر واجهة SQLite الرسمية"""
+    if not os.path.exists(DB):
+        return False
+    try:
+        s = sqlite3.connect(DB, timeout=30)
+        d = sqlite3.connect(SNAP)
+        s.backup(d)
+        d.close()
+        s.close()
+        return True
+    except Exception as e:
+        log("snapshot فشل:", repr(e))
+        return False
 
 
 def kv_get(k, d=None):
@@ -121,6 +156,14 @@ def tg(chat, text, kb=None):
     if kb:
         p["reply_markup"] = {"inline_keyboard": kb}
     return tgapi("sendMessage", p)
+
+
+def notify_once(chat, key, text, gap=1800):
+    r = q(RT, "SELECT ts FROM notif WHERE k=?", (key,), one=True)
+    if r and time.time() - r["ts"] < gap:
+        return
+    q(RT, "INSERT OR REPLACE INTO notif VALUES(?,?)", (key, time.time()))
+    tg(chat, text)
 
 
 HELP = """🤖 أهلاً! كل التحكم من هنا.
@@ -188,8 +231,8 @@ def cmd_add(chat, args):
     blob = enc(json.dumps({"login": login, "password": pw, "server": server}))
     i = q(DB, "INSERT INTO accounts(owner,blob) VALUES(?,?)", (chat, blob))
     mark_dirty()
-    tg(chat, f"✅ تم حفظ الحساب #{i} مشفّراً. جاري الاتصال (قد يستغرق دقيقة)...\n"
-             "🔒 احذف رسالتك التي فيها كلمة السر من المحادثة.")
+    tg(chat, f"✅ تم حفظ الحساب #{i} مشفّراً. جاري الاتصال (قد يستغرق دقيقة أو دقيقتين)...\n"
+             "🔒 احذف رسالتك التي فيها كلمة السر من المحادثة إن بقيت.")
 
 
 def do_action(chat, act, i, extra=None):
@@ -197,10 +240,10 @@ def do_action(chat, act, i, extra=None):
     if not a:
         tg(chat, "❌ حساب غير موجود.")
         return
-    if act in ("p", "ss"):
+    if act == "p":
         tg(chat, status_text(a), panel_kb(i))
     elif act == "go":
-        q(DB, "UPDATE accounts SET trading=1 WHERE id=?", (i,))
+        q(DB, "UPDATE accounts SET trading=1, enabled=1 WHERE id=?", (i,))
         mark_dirty()
         tg(chat, f"▶️ بدأ التداول على الحساب #{i}. سيصلك تحليل كل دخول أو سبب الانتظار.")
     elif act == "stop":
@@ -214,7 +257,7 @@ def do_action(chat, act, i, extra=None):
         q(RT, "INSERT INTO cmds(acc,cmd,ts) VALUES(?,?,?)", (i, "reset", time.time()))
         tg(chat, "♻️ جاري تصفير عدادات الربح والخسارة اليومية.")
     elif act == "rk":
-        q(RT, "INSERT INTO cmds(acc,cmd,ts) VALUES(?,?,?)", (i, f"risk:{extra or 0}", time.time()))
+        q(RT, "INSERT INTO cmds(acc,cmd,ts) VALUES(?,?,?)", (i, "risk", time.time()))
         tg(chat, "⚡ تم استلام طلب المخاطرة، جاري التنفيذ...")
     elif act == "dl":
         tg(chat, f"⚠️ حذف الحساب #{i} نهائياً؟ الصفقات المفتوحة تبقى على حسابك بوقفها وهدفها.",
@@ -247,6 +290,9 @@ def on_message(m):
     rest = rest.strip()
     if cmd == "/add":
         tgapi("deleteMessage", {"chat_id": chat, "message_id": m["message_id"]})
+        if time.time() - m.get("date", 0) > 900:
+            tg(chat, "تجاهلت أمر /add قديماً (أكثر من 15 دقيقة). أعد إرساله إن كنت تريده.")
+            return
         cmd_add(chat, rest)
     elif cmd in ("/help", "/menu"):
         tg(chat, HELP)
@@ -324,7 +370,7 @@ def supervise():
         w = WORKERS.get(i)
         if w and w["p"].poll() is None:
             continue
-        if w and w["p"].returncode == 3:                 # فشل تسجيل الدخول: لا إعادة محاولة
+        if w and w["p"].returncode == 3:                 # خطأ دائم: لا إعادة محاولة
             q(DB, "UPDATE accounts SET enabled=0, trading=0 WHERE id=?", (i,))
             mark_dirty()
             WORKERS.pop(i)
@@ -332,7 +378,7 @@ def supervise():
         if w:
             if w["end"] is None:
                 w["end"] = time.time()
-            if time.time() - w["end"] < 45:
+            if time.time() - w["end"] < 90:
                 continue
         if time.time() - LAST_START > 20:
             start_worker(i)
@@ -347,12 +393,15 @@ def sh(*cmd):
 
 def git_sync():
     global DIRTY
+    if not snapshot():
+        return
     if os.getenv("GITHUB_ACTIONS", "").lower() != "true":
+        DIRTY = False
         return
     br = env("GITHUB_REF_NAME", "main")
     sh("git", "config", "user.name", "MT5-Cloud-Bot")
     sh("git", "config", "user.email", "bot@users.noreply.github.com")
-    sh("git", "add", DB)
+    sh("git", "add", SNAP)
     if sh("git", "diff", "--cached", "--quiet") == 0:
         DIRTY = False
         return
@@ -360,16 +409,26 @@ def git_sync():
     if sh("git", "push", "origin", f"HEAD:{br}") != 0:
         if sh("git", "pull", "--rebase", "--autostash", "origin", br) != 0:
             sh("git", "rebase", "--abort")
-        if sh("git", "push", "origin", f"HEAD:{br}", "--force") != 0:
-            log("git push فشل")
+            log("git sync: تعذر الدمج، سأحاول لاحقاً")
+            return
+        if sh("git", "push", "origin", f"HEAD:{br}") != 0:
+            log("git push فشل، سأحاول لاحقاً")
+            return
     DIRTY = False
 
 
 def master():
-    if not TG_TOKEN or not SECRET or len(DB_KEY) < 16:
-        print("❌ يجب ضبط الأسرار: TELEGRAM_BOT_TOKEN و SECRET_ACCESS_KEY و DB_ENCRYPTION_KEY (16 حرفاً فأكثر)")
+    if not TG_TOKEN or len(SECRET) < 6 or len(DB_KEY) < 16:
+        print("❌ يجب ضبط الأسرار: TELEGRAM_BOT_TOKEN و SECRET_ACCESS_KEY (6 أحرف فأكثر) و DB_ENCRYPTION_KEY (16 حرفاً فأكثر)")
         sys.exit(1)
     init_db()
+    try:                                                  # فحص أن مفتاح التشفير يطابق القاعدة المحفوظة
+        for r in q(DB, "SELECT blob FROM accounts LIMIT 1"):
+            dec(r["blob"])
+    except Exception:
+        print("❌ DB_ENCRYPTION_KEY لا يطابق المفتاح المستخدم عند حفظ الحسابات. أعد المفتاح القديم، "
+              "أو احذف bot_state_v6.db من المستودع لبدء قاعدة جديدة.")
+        sys.exit(1)
     offset = int(kv_get("offset", 0) or 0)
     last_sync = time.time()
     for u in q(DB, "SELECT chat FROM users"):
@@ -379,7 +438,7 @@ def master():
         while time.time() - START < MAX_RUNTIME:
             res = tgapi("getUpdates", {"offset": offset, "timeout": 8,
                                        "allowed_updates": ["message", "callback_query"]}, timeout=25)
-            if "error" in res:
+            if "error" in res or res.get("ok") is False:
                 time.sleep(3)
             for u in res.get("result", []) or []:
                 offset = u["update_id"] + 1
@@ -392,7 +451,7 @@ def master():
                 except Exception as e:
                     log("خطأ معالجة:", repr(e))
             supervise()
-            if (DIRTY and time.time() - last_sync > 60) or time.time() - last_sync > 1200:
+            if (DIRTY and time.time() - last_sync > 60) or time.time() - last_sync > 1800:
                 git_sync()
                 last_sync = time.time()
     finally:
@@ -490,6 +549,8 @@ def mt5_connect(i, cred, exe):
                 return True, None
         err = mt5.last_error()
         wlog(i, "initialize فشل:", err)
+        if err and err[0] == -6:
+            break
         time.sleep(8)
     return False, err
 
@@ -644,6 +705,8 @@ def open_trade(i, owner, sym, side, a, tag, why):
     info, acc = mt5.symbol_info(sym), mt5.account_info()
     lot = norm_lot(sym, a["lot"])
     dtp, dsl = dist_for(sym, lot, a["tp"]), dist_for(sym, lot, a["sl"], True)
+    if not dtp or not dsl:
+        return False, "تعذر حساب الوقف والهدف"
     buy = side == "BUY"
     typ = mt5.ORDER_TYPE_BUY if buy else mt5.ORDER_TYPE_SELL
     t = mt5.symbol_info_tick(sym)
@@ -753,30 +816,36 @@ def worker(i):
     if not a:
         sys.exit(0)
     owner = a["owner"]
-    cred = json.loads(dec(a["blob"]))
+    try:
+        cred = json.loads(dec(a["blob"]))
+    except Exception:
+        tg(owner, f"❌ حساب #{i}: تعذر فك التشفير (تغيّر DB_ENCRYPTION_KEY). احذفه بـ /del {i} وأضفه من جديد.")
+        sys.exit(3)
     SECRETS.append(cred["password"])
     exe = ensure_terminal(i)
     if not exe:
-        tg(owner, f"❌ حساب #{i}: لم أجد منصة MT5 على السيرفر."); sys.exit(4)
+        notify_once(owner, f"noterm{i}", f"❌ حساب #{i}: لم أجد منصة MT5 على السيرفر.")
+        sys.exit(4)
     ok, err = mt5_connect(i, cred, exe)
     if not ok:
         if err and err[0] == -6:
-            tg(owner, f"❌ حساب #{i}: فشل تسجيل الدخول (رقم الحساب/كلمة السر/السيرفر غير صحيحة). "
+            tg(owner, f"❌ حساب #{i}: فشل تسجيل الدخول (رقم الحساب أو كلمة السر أو اسم السيرفر غير صحيح). "
                       f"احذفه بـ /del {i} وأضفه من جديد بالبيانات الصحيحة.")
             sys.exit(3)
-        tg(owner, f"⚠️ حساب #{i}: تعذر الاتصال بالسيرفر {cred['server']} {err}. سأعيد المحاولة تلقائياً.")
+        notify_once(owner, f"conn{i}", f"⚠️ حساب #{i}: تعذر الاتصال بالسيرفر {cred['server']} {err}. سأعيد المحاولة تلقائياً.")
         sys.exit(4)
     acc = mt5.account_info()
     sym = pick_symbol(a["symbol"])
     if not sym:
-        tg(owner, f"❌ حساب #{i}: لم أجد رمز الذهب عند الوسيط. حدده: /set {i} symbol اسم_الرمز"); sys.exit(3)
+        tg(owner, f"❌ حساب #{i}: لم أجد رمز الذهب عند الوسيط. حدده: /set {i} symbol اسم_الرمز ثم /go {i}")
+        sys.exit(3)
     kind = "تجريبي" if acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO else "حقيقي ⚠️"
     ti = mt5.terminal_info()
     tg(owner, f"✅ تم ربط الحساب #{i} ({kind}) | {cred['server']}\n💰 الرصيد {acc.balance:.2f} {acc.currency} | الرمز {sym}\n"
               + ("" if ti and ti.trade_allowed else "⚠️ Algo Trading مغلق في المنصة، قد تُرفض الأوامر.\n")
               + ("▶️ التداول يعمل." if a["trading"] else "⏸ التداول متوقف: اضغط ▶️ لبدء."),
        [[{"text": "🎛 لوحة التحكم", "callback_data": f"p:{i}"}]])
-    last_bar, last_ns, ign, fails, notified_halt = 0, 0, 0, 0, ""
+    last_bar, last_ns, ign, fails = 0, 0, 0, 0
     for p in my_pos():
         TR[p.ticket] = {}
     while True:
@@ -788,7 +857,7 @@ def worker(i):
                 fails += 1
                 ok, _ = mt5_connect(i, cred, exe)
                 if not ok and fails >= 3:
-                    tg(owner, f"❌ حساب #{i}: انقطع الاتصال. الصفقات المفتوحة محمية بوقف وهدف على السيرفر.")
+                    notify_once(owner, f"drop{i}", f"❌ حساب #{i}: انقطع الاتصال. الصفقات المفتوحة محمية بوقف وهدف على السيرفر.")
                     sys.exit(4)
                 continue
             fails = 0
@@ -807,9 +876,9 @@ def worker(i):
                     q(DB, "UPDATE accounts SET base_day=?, base_val=?, halted='' WHERE id=?", (daykey, realized, i))
                     ign = int(sts); a["halted"] = ""; pnl = floating; streak = 0
                     tg(owner, f"♻️ حساب #{i}: تم تصفير عدادات اليوم واستئناف الدخول.")
-                elif c["cmd"].startswith("risk"):
+                elif c["cmd"] == "risk":
                     plan = q(RT, "SELECT * FROM risk WHERE acc=?", (i,), one=True)
-                    if not plan or time.time() - plan["ts"] > 600 or time.time() - c["ts"] > 600:
+                    if not plan or time.time() - plan["ts"] > 600:
                         tg(owner, f"⌛ حساب #{i}: لا توجد فرصة مخاطرة صالحة الآن (انتهت صلاحيتها).")
                     elif len(my_pos()) >= maxt or a["halted"]:
                         tg(owner, f"❌ حساب #{i}: لا يمكن المخاطرة (وصلت للحد الأقصى للصفقات أو التداول متوقف).")
@@ -866,7 +935,7 @@ def worker(i):
                         kb = None
                         if R["risk_ok"]:
                             q(RT, "INSERT OR REPLACE INTO risk VALUES(?,?,?)", (i, json.dumps({"side": R["side"]}), time.time()))
-                            kb = [[{"text": f"⚡ خاطر (خسارة ≤ {a['sl']}$)", "callback_data": f"rk:{i}:{int(time.time())}"}]]
+                            kb = [[{"text": f"⚡ خاطر (خسارة ≤ {a['sl']}$)", "callback_data": f"rk:{i}"}]]
                             txt += f"\n\nاتجاه المخاطرة المحتمل: {R['side']} (ثقة {R['score']}/100)"
                         tg(owner, txt, kb)
         except SystemExit:
@@ -880,5 +949,7 @@ def worker(i):
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "worker":
         worker(int(sys.argv[2]))
+    elif len(sys.argv) >= 2 and sys.argv[1] == "snapshot":
+        snapshot()
     else:
         master()
