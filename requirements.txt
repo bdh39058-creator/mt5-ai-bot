@@ -1,1 +1,3 @@
-#none
+MetaTrader5
+numpy
+cryptography
