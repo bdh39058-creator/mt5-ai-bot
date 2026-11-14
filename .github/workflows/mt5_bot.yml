@@ -9,7 +9,7 @@ on:
 
 concurrency:
   group: mt5-ai-telegram-bot
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 permissions:
   contents: write
@@ -28,11 +28,20 @@ jobs:
           SECRET_ACCESS_KEY: ${{ secrets.SECRET_ACCESS_KEY }}
           DB_ENCRYPTION_KEY: ${{ secrets.DB_ENCRYPTION_KEY }}
         run: |
-          missing=0
-          for v in TELEGRAM_BOT_TOKEN SECRET_ACCESS_KEY DB_ENCRYPTION_KEY; do
-            if [ -z "${!v}" ]; then echo "::error::Secret $v is missing"; missing=1; fi
-          done
-          exit $missing
+          fail=0
+          check() {
+            if [ -z "$2" ]; then
+              echo "::error::السر $1 غير موجود. أضفه من Settings > Secrets and variables > Actions > New repository secret (Repository secret وليس Variable)"
+              fail=1
+            elif [ ${#2} -lt $3 ]; then
+              echo "::error::السر $1 قصير جداً، الحد الأدنى $3 حرفاً"
+              fail=1
+            fi
+          }
+          check TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN" 20
+          check SECRET_ACCESS_KEY "$SECRET_ACCESS_KEY" 6
+          check DB_ENCRYPTION_KEY "$DB_ENCRYPTION_KEY" 16
+          exit $fail
 
       - name: 1. Checkout Repository Code
         uses: actions/checkout@v4
@@ -56,6 +65,7 @@ jobs:
           pip install MetaTrader5 numpy cryptography
 
       - name: 4. Run Bot Manager
+        id: bot
         env:
           PYTHONIOENCODING: utf-8
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -67,18 +77,20 @@ jobs:
           python -X utf8 main.py
 
       - name: 5. Save State and Restart Next Cycle
-        if: always()
+        if: always() && steps.bot.conclusion != 'skipped'
         continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DB_ENCRYPTION_KEY: ${{ secrets.DB_ENCRYPTION_KEY }}
         run: |
+          python -X utf8 main.py snapshot || true
           git config --global user.name "MT5-Cloud-Bot"
           git config --global user.email "bot@users.noreply.github.com"
-          git add multi_mt5_gold_bot.db || true
+          git add bot_state_v6.db || true
           git diff --staged --quiet || git commit -m "Auto-save bot state [skip ci]" || true
           git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || git rebase --abort || true
-          git push origin "HEAD:${GITHUB_REF_NAME}" || git push origin "HEAD:${GITHUB_REF_NAME}" --force || true
+          git push origin "HEAD:${GITHUB_REF_NAME}" || true
           if [ -f restart.flag ]; then
             gh workflow run mt5_bot.yml --ref "${GITHUB_REF_NAME}" || true
           fi
