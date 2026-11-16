@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""MT5 Telegram Scalper v6.1: مدير حسابات متعدد، تحكم كامل من تليجرام"""
+"""MT5 Telegram Scalper v6.2: مدير حسابات متعدد، تحكم كامل من تليجرام"""
 import os, sys, time, json, glob, shutil, sqlite3, subprocess, base64, hashlib, math, urllib.request
 from datetime import datetime, timezone, timedelta
 import numpy as np
@@ -37,16 +37,17 @@ DB_KEY = env("DB_ENCRYPTION_KEY")
 UTC_OFF = env_int("BOT_UTC_OFFSET", 2)
 MAX_ACCOUNTS = env_int("MAX_ACCOUNTS", 6)
 SPREAD_RATIO = env_float("MAX_SPREAD_RATIO", 0.4)
-MAX_HOLD_MIN = env_int("MAX_HOLD_MINUTES", 20)
+MAX_HOLD_MIN = env_int("MAX_HOLD_MINUTES", 15)
 MAGIC = 990066
-DB = "state_live.db"              # القاعدة الحية (لا تُرفع)
-SNAP = "bot_state_v6.db"          # نسخة سليمة تُرفع إلى GitHub
+DB = "state_live.db"
+SNAP = "bot_state_v6.db"
 RT = "runtime.db"
 START = time.time()
 MAX_RUNTIME = 335 * 60
 SESSION = (7, 20)
 DIRTY = False
 SECRETS = [TG_TOKEN, SECRET, DB_KEY]
+CUR = {"login": ""}
 AR_DAYS = ["الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد"]
 
 
@@ -93,12 +94,16 @@ def q(file, sql, args=(), one=False):
 
 def init_db():
     if not os.path.exists(DB) and os.path.exists(SNAP):
-        shutil.copy(SNAP, DB)                           # استعادة الحالة المحفوظة
+        shutil.copy(SNAP, DB)
     q(DB, "CREATE TABLE IF NOT EXISTS users(chat TEXT PRIMARY KEY)")
     q(DB, """CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT, blob TEXT,
         enabled INT DEFAULT 1, trading INT DEFAULT 0, lot REAL DEFAULT 0.01, tp REAL DEFAULT 1.0,
         sl REAL DEFAULT 1.0, maxt INT DEFAULT 2, dloss REAL DEFAULT 5, dprofit REAL DEFAULT 10,
         symbol TEXT DEFAULT '', base_day TEXT DEFAULT '', base_val REAL DEFAULT 0, halted TEXT DEFAULT '')""")
+    try:
+        q(DB, "ALTER TABLE accounts ADD COLUMN mode TEXT DEFAULT 'fast'")
+    except Exception:
+        pass
     q(DB, "CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT)")
     q(RT, "CREATE TABLE IF NOT EXISTS status(acc INTEGER PRIMARY KEY, txt TEXT, ts REAL)")
     q(RT, "CREATE TABLE IF NOT EXISTS cmds(id INTEGER PRIMARY KEY AUTOINCREMENT, acc INT, cmd TEXT, ts REAL)")
@@ -107,7 +112,6 @@ def init_db():
 
 
 def snapshot():
-    """نسخة سليمة من القاعدة الحية عبر واجهة SQLite الرسمية"""
     if not os.path.exists(DB):
         return False
     try:
@@ -168,15 +172,17 @@ def notify_once(chat, key, text, gap=1800):
 
 HELP = """🤖 أهلاً! كل التحكم من هنا.
 
-➕ ربط حساب:
+➕ ربط حساب (تجريبي أو حقيقي):
 /add رقم_الحساب كلمة_السر اسم_السيرفر
 مثال: /add 12345678 MyPass123 MetaQuotes-Demo
 
 📋 /accounts  ← قائمة حساباتك ولوحة التحكم
 ⚙️ /set رقم الحساب المفتاح القيمة
-  المفاتيح: lot (اللوت) | tp (ربح الصفقة بالدولار) | sl (خسارة الصفقة بالدولار)
-  maxt (أقصى صفقات متزامنة 1-5) | dloss (حد خسارة اليوم) | dprofit (حد ربح اليوم) | symbol
-  مثال: /set 1 tp 1.5   (القيمة 0 في dloss/dprofit تعني بلا حد)
+  lot (اللوت) | tp (ربح الصفقة $) | sl (خسارة الصفقة $)
+  maxt (أقصى صفقات متزامنة 1-5) | dloss (حد خسارة اليوم) | dprofit (حد ربح اليوم)
+  symbol (الرمز مثل EURUSD أو XAUUSD، و - للرجوع للذهب)
+  mode (fast دخول أكثر | safe دخول أقل وأدق)
+  مثال سنتات: /set 1 symbol EURUSD  ثم  /set 1 tp 0.6  ثم  /set 1 sl 0.5
 ▶️ /go 1   ⏸ /stop 1   📊 /status 1   ❎ /closeall 1   ♻️ /reset 1   🗑 /del 1
 
 الحساب الجديد يبدأ متوقفاً عن التداول حتى تضغط ▶️."""
@@ -191,7 +197,7 @@ def panel_kb(i):
 def settings_text(a):
     return (f"⚙️ حساب #{a['id']}\nاللوت {a['lot']} | ربح الصفقة +{a['tp']}$ | خسارة الصفقة -{a['sl']}$\n"
             f"أقصى صفقات متزامنة {a['maxt']} | حد خسارة اليوم {a['dloss']}$ | حد ربح اليوم {a['dprofit']}$\n"
-            f"الرمز: {a['symbol'] or 'تلقائي (ذهب)'}\n"
+            f"الرمز: {a['symbol'] or 'تلقائي (ذهب)'} | الوضع: {a.get('mode') or 'fast'}\n"
             f"التداول: {'▶️ مفعّل' if a['trading'] else '⏸ متوقف'}"
             f"{' | 🛑 ' + a['halted'].split(':', 1)[-1] if a['halted'] else ''}")
 
@@ -311,6 +317,9 @@ def on_message(m):
         try:
             if k == "symbol":
                 val = v.upper() if v != "-" else ""
+            elif k == "mode":
+                val = v.lower()
+                assert val in ("fast", "safe")
             elif k == "maxt":
                 val = max(1, min(5, int(v)))
             elif k in ("lot", "tp", "sl"):
@@ -322,7 +331,7 @@ def on_message(m):
             else:
                 raise ValueError
         except Exception:
-            tg(chat, "❌ مفتاح أو قيمة غير صالحة. المفاتيح: lot tp sl maxt dloss dprofit symbol")
+            tg(chat, "❌ مفتاح أو قيمة غير صالحة. المفاتيح: lot tp sl maxt dloss dprofit symbol mode")
             return
         q(DB, f"UPDATE accounts SET {k}=? WHERE id=?", (val, i))
         mark_dirty()
@@ -370,7 +379,7 @@ def supervise():
         w = WORKERS.get(i)
         if w and w["p"].poll() is None:
             continue
-        if w and w["p"].returncode == 3:                 # خطأ دائم: لا إعادة محاولة
+        if w and w["p"].returncode == 3:
             q(DB, "UPDATE accounts SET enabled=0, trading=0 WHERE id=?", (i,))
             mark_dirty()
             WORKERS.pop(i)
@@ -422,7 +431,7 @@ def master():
         print("❌ يجب ضبط الأسرار: TELEGRAM_BOT_TOKEN و SECRET_ACCESS_KEY (6 أحرف فأكثر) و DB_ENCRYPTION_KEY (16 حرفاً فأكثر)")
         sys.exit(1)
     init_db()
-    try:                                                  # فحص أن مفتاح التشفير يطابق القاعدة المحفوظة
+    try:
         for r in q(DB, "SELECT blob FROM accounts LIMIT 1"):
             dec(r["blob"])
     except Exception:
@@ -508,7 +517,7 @@ def adx(r, n=14):
 
 
 def rates(sym, tf, need):
-    r = mt5.copy_rates_from_pos(sym, tf, 1, 320)         # شموع مغلقة فقط
+    r = mt5.copy_rates_from_pos(sym, tf, 1, 320)
     return r if r is not None and len(r) >= need else None
 
 
@@ -533,13 +542,93 @@ def ensure_terminal(i):
     if not os.path.exists(exe):
         shutil.copytree(src, dst, dirs_exist_ok=True)
     os.makedirs(os.path.join(dst, "config"), exist_ok=True)
-    with open(os.path.join(dst, "config", "common.ini"), "w", encoding="utf-16") as f:
-        f.write("[Experts]\nEnabled=1\nAllowLiveTrading=1\nAllowDllImport=0\n")
+    try:
+        with open(os.path.join(dst, "config", "common.ini"), "w", encoding="utf-16") as f:
+            f.write("[Experts]\nEnabled=1\nAllowLiveTrading=1\nAllowDllImport=0\n")
+    except Exception as e:
+        log("common.ini:", e)
     return exe
 
 
-def mt5_connect(i, cred, exe):
+def launch_terminal(exe, cred):
+    """تشغيل المنصة بملف إعداد بدء يفعّل التداول الآلي من اللحظة الأولى"""
+    ini = os.path.join(os.path.dirname(exe), "config", "startup_tmp.ini")
+    try:
+        with open(ini, "w", encoding="utf-8") as f:
+            f.write(f"[Common]\nLogin={cred['login']}\nPassword={cred['password']}\nServer={cred['server']}\n"
+                    f"[Experts]\nEnabled=1\nAllowLiveTrading=1\nAllowDllImport=0\n")
+        subprocess.Popen([exe, "/portable", f"/config:{ini}"])
+        time.sleep(25)
+    except Exception as e:
+        log("launch_terminal:", repr(e))
+    finally:
+        try:
+            os.remove(ini)
+        except Exception:
+            pass
+
+
+def _find_hwnd(login):
+    import ctypes
+    from ctypes import wintypes
+    u = ctypes.windll.user32
+    found = []
+    CB = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+    def cb(h, _l):
+        if u.IsWindowVisible(h):
+            n = u.GetWindowTextLengthW(h)
+            if n:
+                buf = ctypes.create_unicode_buffer(n + 1)
+                u.GetWindowTextW(h, buf, n + 1)
+                if str(login) in buf.value:
+                    found.append(h)
+        return True
+
+    u.EnumWindows(CB(cb), 0)
+    return found[0] if found else None
+
+
+def toggle_algo(login):
+    """يضغط Ctrl+E على نافذة المنصة (نفس زر Algo Trading)"""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        u = ctypes.windll.user32
+        h = _find_hwnd(login)
+        if not h:
+            return False
+        u.ShowWindow(h, 9)
+        u.keybd_event(0x12, 0, 0, 0)
+        u.keybd_event(0x12, 0, 2, 0)
+        u.SetForegroundWindow(h)
+        time.sleep(0.6)
+        u.keybd_event(0x11, 0, 0, 0)
+        u.keybd_event(0x45, 0, 0, 0)
+        u.keybd_event(0x45, 0, 2, 0)
+        u.keybd_event(0x11, 0, 2, 0)
+        return True
+    except Exception as e:
+        log("toggle_algo:", repr(e))
+        return False
+
+
+def ensure_algo():
+    for _ in range(3):
+        ti = mt5.terminal_info()
+        if ti and ti.trade_allowed:
+            return True
+        toggle_algo(CUR["login"])
+        time.sleep(3)
+    ti = mt5.terminal_info()
+    return bool(ti and ti.trade_allowed)
+
+
+def mt5_connect(i, cred, exe, launch=True):
     err = None
+    if launch:
+        launch_terminal(exe, cred)
     for _ in range(3):
         mt5.shutdown()
         if mt5.initialize(path=exe, portable=True, login=int(cred["login"]), password=cred["password"],
@@ -556,15 +645,20 @@ def mt5_connect(i, cred, exe):
 
 
 def pick_symbol(pref):
-    c = ([pref] if pref else []) + ["XAUUSD", "XAUUSDm", "XAUUSD.", "XAUUSD.a", "XAUUSDc", "GOLD", "GOLDm", "XAUUSD#"]
-    for s in c:
+    if pref:
+        if mt5.symbol_select(pref, True) and mt5.symbol_info(pref):
+            return pref
+        for s in mt5.symbols_get() or []:
+            if s.name.upper().startswith(pref.upper()) and mt5.symbol_select(s.name, True):
+                return s.name
+        return None
+    for s in ["XAUUSD", "XAUUSDm", "XAUUSD.", "XAUUSD.a", "XAUUSDc", "GOLD", "GOLDm", "XAUUSD#"]:
         if mt5.symbol_select(s, True) and mt5.symbol_info(s):
             return s
-    if not pref:
-        for s in mt5.symbols_get() or []:
-            if "XAU" in s.name.upper() or "GOLD" in s.name.upper():
-                mt5.symbol_select(s.name, True)
-                return s.name
+    for s in mt5.symbols_get() or []:
+        if "XAU" in s.name.upper() or "GOLD" in s.name.upper():
+            mt5.symbol_select(s.name, True)
+            return s.name
     return None
 
 
@@ -576,7 +670,6 @@ def norm_lot(sym, lot):
 
 
 def dist_for(sym, lot, usd, down=False):
-    """يحوّل مبلغاً بالدولار إلى مسافة سعرية حقيقية عند هذا اللوت"""
     info, t = mt5.symbol_info(sym), mt5.symbol_info_tick(sym)
     p = mt5.order_calc_profit(mt5.ORDER_TYPE_BUY, sym, lot, t.ask, t.ask + info.point * 100)
     if not p:
@@ -604,6 +697,8 @@ def next_window(kind, now):
         return "السبريد يتسع عادة عند الأخبار وافتتاح الجلسات ويضيق بعدها؛ أتوقع تحسناً خلال 10–30 دقيقة."
     if kind == "amount":
         return "لن يتحسن الوضع وحده: عدّل المبلغ أو اللوت بالأمر /set."
+    if kind == "noise":
+        return "الضجيج يهدأ عادة بعد 15–45 دقيقة من الأخبار أو افتتاح الجلسة، لكن وقفك الصغير سيبقى أصغر من حركة السوق غالباً."
     w0 = now.replace(hour=13, minute=0, second=0, microsecond=0)
     if now < w0:
         return f"أقوى نافذة سيولة عادةً {local(w0)}–{local(w0 + timedelta(hours=4))} بتوقيتك (تداخل لندن/نيويورك)."
@@ -613,7 +708,8 @@ def next_window(kind, now):
 
 
 def analyze(sym, a):
-    R = {"d": "BLOCK", "ok": [], "bad": [], "kind": "", "side": None, "score": 0, "risk_ok": False}
+    R = {"d": "BLOCK", "ok": [], "bad": [], "kind": "", "side": None, "score": 0, "risk_ok": False, "tip": ""}
+    fast = (a.get("mode") or "fast") == "fast"
     info, t = mt5.symbol_info(sym), mt5.symbol_info_tick(sym)
     if not info or not t or t.ask <= 0:
         R["bad"].append("لا أسعار حية"); R["kind"] = "data"; return R
@@ -629,11 +725,13 @@ def analyze(sym, a):
         R["bad"].append("تعذر حساب مستويات الدولار"); R["kind"] = "amount"; return R
     minstop = info.trade_stops_level * info.point + spread + 2 * info.point
     if min(dsl, dtp) < minstop:
-        R["bad"].append(f"مبلغ الوقف/الهدف صغير جداً: مسافتك {min(dsl, dtp):.2f} والمطلوب ≥ {minstop:.2f}")
-        R["kind"] = "amount"; return R
+        R["bad"].append(f"مبلغ الوقف/الهدف صغير جداً: مسافتك {min(dsl, dtp):.5g} والمطلوب ≥ {minstop:.5g}")
+        R["kind"] = "amount"
+        R["tip"] = "💡 ارفع tp و sl قليلاً."
+        return R
     spread_bad = spread > SPREAD_RATIO * dtp
     if spread_bad:
-        R["bad"].append(f"السبريد {spread:.2f} يلتهم {spread / dtp * 100:.0f}% من هدفك ({dtp:.2f})")
+        R["bad"].append(f"السبريد {spread:.5g} يلتهم {spread / dtp * 100:.0f}% من هدفك ({dtp:.5g})")
     m15, m5, m1 = rates(sym, mt5.TIMEFRAME_M15, 220), rates(sym, mt5.TIMEFRAME_M5, 60), rates(sym, mt5.TIMEFRAME_M1, 60)
     if m15 is None or m5 is None or m1 is None:
         R["bad"].append("بيانات الشموع غير كافية"); R["kind"] = "data"; return R
@@ -651,6 +749,11 @@ def analyze(sym, a):
         trig = 1
     elif m1["high"][-2] >= e9m[-2] and c1[-1] < e9m[-1] and c1[-1] < o1[-1] and 30 <= r7[-1] <= 60 and r7[-1] < r7[-2]:
         trig = -1
+    ppd = dtp / a["tp"]                       # مسافة سعرية لكل 1$ عند هذا اللوت
+    noise = at1 / dsl
+    max_noise = 2.5 if fast else 1.5
+    noise_bad = noise > max_noise
+    need_sl = round(1.3 * at1 / ppd, 2)
     sc = 0
     if d15:
         sc += 30; R["ok"].append("اتجاه M15 " + ("صاعد" if d15 > 0 else "هابط") + " (EMA50/200)")
@@ -668,20 +771,23 @@ def analyze(sym, a):
         sc += 15; R["ok"].append(f"قوة الاتجاه ADX={ax:.0f}")
     else:
         R["bad"].append(f"ADX={ax:.0f} ضعيف (سوق عرضي)")
-    if dtp / 4 <= at1 <= 1.5 * dsl:
-        sc += 10; R["ok"].append("تذبذب الدقيقة مناسب لحجم هدفك ووقفك")
-    elif at1 > 1.5 * dsl:
-        R["bad"].append(f"ضجيج الدقيقة ({at1:.2f}) أكبر من وقفك ({dsl:.2f}): سيُضرب بالعشوائية")
-    else:
+    if at1 < dtp / 4:
         R["bad"].append("حركة الدقيقة أضعف من أن تبلغ هدفك بسرعة")
+    elif noise_bad:
+        R["bad"].append(f"ضجيج الدقيقة ({at1:.5g}) أكبر من وقفك ({dsl:.5g}): سيُضرب بالعشوائية")
+        R["tip"] = (f"💡 لتجنب الضجيج: ارفع sl إلى ≈ {need_sl}$ (والهدف بنسبة قريبة)، "
+                    f"أو جرّب زوجاً أقل تذبذباً: /set رقم_الحساب symbol EURUSD")
+    elif noise <= 1.5:
+        sc += 10; R["ok"].append("تذبذب الدقيقة مناسب لحجم هدفك ووقفك")
     if abs(c5[-1] - e21[-1]) > 2.5 * at5:
         sc -= 15; R["bad"].append("السعر ممتد بعيداً عن متوسطه (دخول متأخر خطر)")
     side = d15 or d5 or trig
     R.update(score=sc, side=("BUY" if side > 0 else "SELL") if side else None, adx=ax, spread=spread, dtp=dtp, dsl=dsl)
-    if d15 and d5 == d15 and trig == d15 and sc >= 85 and not spread_bad:
+    min_sc = 70 if fast else 85
+    if d15 and d5 == d15 and trig == d15 and sc >= min_sc and not spread_bad and not noise_bad:
         R["d"] = "ENTER"
         return R
-    R["kind"] = "spread" if spread_bad else "trend" if not d15 else "adx" if ax < 20 else "trigger"
+    R["kind"] = "spread" if spread_bad else "noise" if noise_bad else "trend" if not d15 else "adx" if ax < 20 else "trigger"
     R["risk_ok"] = bool(side) and sc >= 40 and spread <= 0.8 * dtp
     R["d"] = "WEAK" if R["risk_ok"] else "BLOCK"
     return R
@@ -703,6 +809,10 @@ def fills(info):
 
 def open_trade(i, owner, sym, side, a, tag, why):
     info, acc = mt5.symbol_info(sym), mt5.account_info()
+    if not acc.trade_allowed or not acc.trade_expert:
+        return False, "الحساب لا يسمح بالتداول الآلي (قد تكون كلمة سر المراقب Investor أو الوسيط يمنع الإكسبرتات)"
+    if not ensure_algo():
+        return False, "Algo Trading ما زال مغلقاً في المنصة ولم أستطع تفعيله"
     lot = norm_lot(sym, a["lot"])
     dtp, dsl = dist_for(sym, lot, a["tp"]), dist_for(sym, lot, a["sl"], True)
     if not dtp or not dsl:
@@ -713,8 +823,8 @@ def open_trade(i, owner, sym, side, a, tag, why):
     margin = mt5.order_calc_margin(typ, sym, lot, t.ask if buy else t.bid)
     if margin is None or margin > acc.margin_free * 0.5:
         return False, "الهامش الحر لا يكفي"
-    fl, last = fills(info), None
-    for n in range(6):
+    fl, last, algo_tried = fills(info), None, False
+    for n in range(7):
         t = mt5.symbol_info_tick(sym)
         price = t.ask if buy else t.bid
         sl = round(price - dsl if buy else price + dsl, info.digits)
@@ -728,7 +838,12 @@ def open_trade(i, owner, sym, side, a, tag, why):
             time.sleep(1.5); continue
         if res.retcode in OK:
             break
-        if res.retcode == 10016:                       # افتح أولاً ثم ركّب الوقف
+        if res.retcode == 10027 and not algo_tried:
+            algo_tried = True
+            toggle_algo(CUR["login"])
+            time.sleep(3)
+            continue
+        if res.retcode == 10016:
             req.pop("sl"); req.pop("tp")
             r2 = mt5.order_send(req)
             if r2 and r2.retcode in OK:
@@ -740,7 +855,7 @@ def open_trade(i, owner, sym, side, a, tag, why):
                 res = r2
                 break
         if res.retcode in (10017, 10018, 10019, 10027, 10040, 10042, 10043, 10044):
-            return False, f"رفض الوسيط (كود {res.retcode})" + (" - فعّل Algo Trading" if res.retcode == 10027 else "")
+            return False, f"رفض الوسيط (كود {res.retcode})"
         time.sleep(1.5 if res.retcode == 10024 else 0.7)
     else:
         return False, f"فشل التنفيذ (كود {last.retcode if last else 'None'})"
@@ -822,6 +937,7 @@ def worker(i):
         tg(owner, f"❌ حساب #{i}: تعذر فك التشفير (تغيّر DB_ENCRYPTION_KEY). احذفه بـ /del {i} وأضفه من جديد.")
         sys.exit(3)
     SECRETS.append(cred["password"])
+    CUR["login"] = cred["login"]
     exe = ensure_terminal(i)
     if not exe:
         notify_once(owner, f"noterm{i}", f"❌ حساب #{i}: لم أجد منصة MT5 على السيرفر.")
@@ -835,15 +951,20 @@ def worker(i):
         notify_once(owner, f"conn{i}", f"⚠️ حساب #{i}: تعذر الاتصال بالسيرفر {cred['server']} {err}. سأعيد المحاولة تلقائياً.")
         sys.exit(4)
     acc = mt5.account_info()
-    sym = pick_symbol(a["symbol"])
+    cur_pref = a["symbol"]
+    sym = pick_symbol(cur_pref)
     if not sym:
-        tg(owner, f"❌ حساب #{i}: لم أجد رمز الذهب عند الوسيط. حدده: /set {i} symbol اسم_الرمز ثم /go {i}")
+        tg(owner, f"❌ حساب #{i}: لم أجد الرمز '{cur_pref or 'الذهب'}' عند الوسيط. حدده: /set {i} symbol اسم_الرمز ثم /go {i}")
         sys.exit(3)
+    algo_ok = ensure_algo()
     kind = "تجريبي" if acc.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO else "حقيقي ⚠️"
-    ti = mt5.terminal_info()
+    extra = ""
+    if not algo_ok:
+        extra += "⚠️ Algo Trading ما زال مغلقاً رغم المحاولة التلقائية.\n"
+    if not acc.trade_allowed:
+        extra += "⚠️ هذا الحساب لا يسمح بالتداول (ربما كلمة سر مراقب Investor).\n"
     tg(owner, f"✅ تم ربط الحساب #{i} ({kind}) | {cred['server']}\n💰 الرصيد {acc.balance:.2f} {acc.currency} | الرمز {sym}\n"
-              + ("" if ti and ti.trade_allowed else "⚠️ Algo Trading مغلق في المنصة، قد تُرفض الأوامر.\n")
-              + ("▶️ التداول يعمل." if a["trading"] else "⏸ التداول متوقف: اضغط ▶️ لبدء."),
+              + extra + ("▶️ التداول يعمل." if a["trading"] else "⏸ التداول متوقف: اضغط ▶️ لبدء."),
        [[{"text": "🎛 لوحة التحكم", "callback_data": f"p:{i}"}]])
     last_bar, last_ns, ign, fails = 0, 0, 0, 0
     for p in my_pos():
@@ -856,11 +977,21 @@ def worker(i):
             if not mt5.terminal_info() or not mt5.account_info():
                 fails += 1
                 ok, _ = mt5_connect(i, cred, exe)
+                if ok:
+                    ensure_algo()
                 if not ok and fails >= 3:
                     notify_once(owner, f"drop{i}", f"❌ حساب #{i}: انقطع الاتصال. الصفقات المفتوحة محمية بوقف وهدف على السيرفر.")
                     sys.exit(4)
                 continue
             fails = 0
+            if a["symbol"] != cur_pref:
+                cur_pref = a["symbol"]
+                ns = pick_symbol(cur_pref)
+                if ns:
+                    sym, last_bar = ns, 0
+                    tg(owner, f"🔄 حساب #{i}: تم تغيير الرمز إلى {sym}")
+                else:
+                    tg(owner, f"❌ حساب #{i}: الرمز '{cur_pref}' غير موجود عند الوسيط، أبقيت {sym}.")
             maxt = max(1, min(5, a["maxt"]))
             daykey, realized, floating, streak, last_loss, sts = day_info(sym, ign)
             base = a["base_val"] if a["base_day"] == daykey else 0.0
@@ -890,7 +1021,7 @@ def worker(i):
                             tg(owner, f"❌ حساب #{i}: {msg}")
                         q(RT, "DELETE FROM risk WHERE acc=?", (i,))
             track_closed(i, owner)
-            for p in my_pos():                                   # إغلاق زمني
+            for p in my_pos():
                 if sts - p.time > MAX_HOLD_MIN * 60 and close_pos(p):
                     tg(owner, f"⏱ حساب #{i}: أُغلقت #{p.ticket} زمنياً (تجاوزت {MAX_HOLD_MIN} دقيقة بلا هدف/وقف).")
             if not a["halted"]:
@@ -911,7 +1042,7 @@ def worker(i):
             ac = mt5.account_info()
             q(RT, "INSERT OR REPLACE INTO status VALUES(?,?,?)",
               (i, f"💰 رصيد {ac.balance:.2f} | إكويتي {ac.equity:.2f} {ac.currency}\n📂 صفقات مفتوحة {len(my_pos())}/{maxt} "
-                  f"(عائم {floating:+.2f}$)\n📆 نتيجة اليوم {pnl:+.2f}$ | خسائر متتالية {streak}\n🔁 {state}", time.time()))
+                  f"(عائم {floating:+.2f}$)\n📆 نتيجة اليوم {pnl:+.2f}$ | خسائر متتالية {streak}\n🔁 {state} | {sym}", time.time()))
             if a["trading"] and not a["halted"] and not cooldown:
                 bar = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_M1, 1, 1)
                 if bar is not None and int(bar[-1]["time"]) != last_bar:
@@ -929,9 +1060,11 @@ def worker(i):
                     elif not pos and time.time() - last_ns > 1800:
                         last_ns = time.time()
                         now = datetime.now(timezone.utc)
-                        txt = (f"⏳ الوقت الحالي غير مناسب للتداول (حساب #{i})\n❓ السبب:\n"
+                        txt = (f"⏳ الوقت الحالي غير مناسب للتداول (حساب #{i} - {sym})\n❓ السبب:\n"
                                + "\n".join("• " + x for x in R["bad"][:5])
                                + f"\n\n🔮 توقعي للوقت المناسب: {next_window(R['kind'], now)}\n(تقدير تقريبي وليس ضماناً)")
+                        if R.get("tip"):
+                            txt += "\n\n" + R["tip"].replace("رقم_الحساب", str(i))
                         kb = None
                         if R["risk_ok"]:
                             q(RT, "INSERT OR REPLACE INTO risk VALUES(?,?,?)", (i, json.dumps({"side": R["side"]}), time.time()))
