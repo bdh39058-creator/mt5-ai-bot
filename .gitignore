@@ -1,5 +1,19 @@
+# تجاهل الملفات المؤقتة وملفات الكاش
+__pycache__/
+*.py[cod]
+*.log
+*.tmp
+mt5setup.exe
+global_servers.dat
+mt5_startup.ini
+
+# تجاهل قواعد البيانات القديمة وملفات WAL المؤقتة
+bot_state_v6.db
 runtime.db
 state_live.db
 restart.flag
-__pycache__/
-*.log
+*.db-wal
+*.db-shm
+
+# السماح بحفظ قاعدة بيانات البوت الأساسية
+!multi_mt5_gold_bot.db
